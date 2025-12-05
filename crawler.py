@@ -469,7 +469,7 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
         autocommit=False,
     )
 
-    delete_sql = "TRUNCATE TABLE contests"
+    # delete_sql = "TRUNCATE TABLE contests"
     insert_sql = (
         "INSERT INTO contests ("
         "categories, end_date, image_url, name, organization_name, site_url, start_date, "
@@ -479,7 +479,7 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
 
     with connection:
         with connection.cursor() as cursor:
-            cursor.execute(delete_sql)
+            # cursor.execute(delete_sql)
             cursor.executemany(insert_sql, payloads)
         connection.commit()
         logger.info("Persisted %d contest records to RDS", len(payloads))
