@@ -70,3 +70,6 @@ drivers/
 
 # dotenv
 .env
+
+# python-version
+.python-version
