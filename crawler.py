@@ -209,6 +209,13 @@ class LinkareerCrawler:
             "activity_img": None,
             "organization_name": None,
             "detail_url": detail_url,
+            # --- 추가해야 하는 필드들 ---
+            "award_scale": None,
+            "benefits": None,
+            "additional_benefits": None,
+            "target_participants": None,
+            "company_type": None,
+            "views": None,
         }
 
         # --- 각 필드 스크래핑 시작 ---
@@ -275,6 +282,60 @@ class LinkareerCrawler:
                 result["activity_img"] = poster_img.get_attribute("src")
             except NoSuchElementException:
                 logger.debug("Activity image not found on %s", detail_url)
+
+        # --- 추가 항목들 수집 (CSS_SELECTOR는 직접 넣어야 함) ---
+
+        try:
+            # 예: 상금 규모
+            result["award_scale"] = driver.find_element(
+                By.CSS_SELECTOR, 'dl[class^="AwardScaleField__"] dd'
+            ).text.strip()
+        except NoSuchElementException:
+            pass
+
+        try:
+            # 예: 혜택
+            result["benefits"] = driver.find_element(
+                By.CSS_SELECTOR, 'dl[class^="BenefitField__"] dd'
+            ).text.strip()
+        except NoSuchElementException:
+            pass
+
+        try:
+            # 예: 추가 혜택
+            result["additional_benefits"] = driver.find_elements(
+                By.CSS_SELECTOR, 'div[class^="BenefitListSection__"] li'
+            )
+            # 배열 형태일 수 있으므로 join 처리
+            result["additional_benefits"] = ", ".join(
+                [el.text.strip() for el in result["additional_benefits"]]
+            )
+        except NoSuchElementException:
+            pass
+
+        try:
+            # 예: 참가 대상
+            result["target_participants"] = driver.find_element(
+                By.CSS_SELECTOR, 'dl[class^="TargetField__"] dd'
+            ).text.strip()
+        except NoSuchElementException:
+            pass
+
+        try:
+            # 예: 회사 유형
+            result["company_type"] = driver.find_element(
+                By.CSS_SELECTOR, 'ul[class^="CategoryChipList__"] p'
+            ).text.strip()
+        except NoSuchElementException:
+            pass
+
+        try:
+            # 조회수
+            result["views"] = driver.find_element(
+                By.CSS_SELECTOR, 'span[class^="ViewCount__"]'
+            ).text.strip()
+        except NoSuchElementException:
+            pass
 
         # 주최/주관 (organization_name): 다양한 라벨을 대상으로 텍스트를 추출
         org_name = self._extract_organization_name(driver)
@@ -378,13 +439,19 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
 
         payloads.append(
             (
-                category_str,
-                end_date,
-                image_url,
-                title,
-                organization,
-                site_url,
-                start_date,
+                category_str,  # categories
+                end_date,  # end_date
+                image_url,  # image_url
+                title,  # name
+                organization,  # organization_name
+                site_url,  # site_url
+                start_date,  # start_date
+                record.get("award_scale") or "",
+                record.get("benefits") or "",
+                record.get("additional_benefits") or "",
+                record.get("target_participants") or "",
+                record.get("company_type") or "",
+                int(record.get("views") or 0),
             )
         )
 
@@ -404,8 +471,10 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
 
     delete_sql = "TRUNCATE TABLE contests"
     insert_sql = (
-        "INSERT INTO contests (category, end_date, image_url, name, organization_name, site_url, start_date) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)"
+        "INSERT INTO contests ("
+        "categories, end_date, image_url, name, organization_name, site_url, start_date, "
+        "award_scale, benefits, additional_benefits, target_participants, company_type, views"
+        ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
     )
 
     with connection:
