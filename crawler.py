@@ -67,24 +67,24 @@ class LinkareerCrawler:
         self.driver = None
 
     def _make_driver(self):
-        """Selenium WebDriver 인스턴스를 생성하고 설정을 최적화"""
         opts = Options()
-        # headless 모드 설정: True일 경우 UI 없이 백그라운드에서 실행
-        if self.headless:
-            opts.add_argument("--headless=new")
 
-        # Docker 또는 Linux 환경에서 권한 문제 및 메모리 부족 문제 방지를 위한 옵션
+        # headless 모드
+        opts.add_argument("--headless=new")
+
+        # EC2 Linux 서버용 필수 옵션들
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument(f"--window-size={self.viewport[0]},{self.viewport[1]}")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--remote-debugging-port=9222")
+        opts.add_argument("--window-size=1200,900")
 
-        # 이미지 로딩 비활성화: 크롤링 속도 향상 및 리소스 사용량 감소
+        # 이미지 로딩 비활성화
         prefs = {"profile.managed_default_content_settings.images": 2}
         opts.add_experimental_option("prefs", prefs)
 
-        # ChromeDriverManager를 통해 시스템에 맞는 드라이버를 자동으로 설치
-        # Service 객체를 명시적으로 사용하여 executable_path와 options를 분리하여 전달
-        service = Service(executable_path=ChromeDriverManager().install())
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=opts)
         return driver
 
