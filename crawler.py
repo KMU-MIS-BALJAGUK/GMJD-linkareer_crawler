@@ -520,7 +520,7 @@ def crawl_pages(
 
 
 def main():
-    pages = int(os.getenv("LINKAREER_PAGE_LIMIT", "1"))
+    pages = int(os.getenv("LINKAREER_PAGE_LIMIT", "100"))
     per_page_limit_env = os.getenv("LINKAREER_PER_PAGE_LIMIT")
     per_page_limit = int(per_page_limit_env) if per_page_limit_env else None
     headless = os.getenv("LINKAREER_HEADLESS", "true").lower() != "false"
