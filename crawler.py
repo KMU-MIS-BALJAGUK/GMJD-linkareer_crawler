@@ -244,13 +244,15 @@ class LinkareerCrawler:
             category_elements = driver.find_elements(
                 By.CSS_SELECTOR, "ul[class^='CategoryChipList__'] p"
             )
+
             categories = []
             for p_element in category_elements:
-                categories.extend(p_element.text.strip().split("/"))
-            # 빈 문자열 제거 후 리스트로
-            result["activity_category"] = [
-                cat.strip() for cat in categories if cat.strip()
-            ]
+                text = p_element.text.strip()
+                if text:
+                    categories.append(text)  # split 하지 않음!
+
+            result["activity_category"] = categories
+
         except NoSuchElementException:
             logger.debug("Category not found on %s", detail_url)
 
@@ -288,7 +290,8 @@ class LinkareerCrawler:
         try:
             # 예: 상금 규모
             result["award_scale"] = driver.find_element(
-                By.CSS_SELECTOR, 'dl[class^="AwardScaleField__"] dd'
+                By.CSS_SELECTOR,
+                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(3) > dd",
             ).text.strip()
         except NoSuchElementException:
             pass
@@ -296,7 +299,8 @@ class LinkareerCrawler:
         try:
             # 예: 혜택
             result["benefits"] = driver.find_element(
-                By.CSS_SELECTOR, 'dl[class^="BenefitField__"] dd'
+                By.CSS_SELECTOR,
+                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(6) > dd",
             ).text.strip()
         except NoSuchElementException:
             pass
@@ -304,7 +308,8 @@ class LinkareerCrawler:
         try:
             # 예: 추가 혜택
             result["additional_benefits"] = driver.find_elements(
-                By.CSS_SELECTOR, 'div[class^="BenefitListSection__"] li'
+                By.CSS_SELECTOR,
+                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(8) > dd",
             )
             # 배열 형태일 수 있으므로 join 처리
             result["additional_benefits"] = ", ".join(
@@ -316,7 +321,8 @@ class LinkareerCrawler:
         try:
             # 예: 참가 대상
             result["target_participants"] = driver.find_element(
-                By.CSS_SELECTOR, 'dl[class^="TargetField__"] dd'
+                By.CSS_SELECTOR,
+                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(2) > dd",
             ).text.strip()
         except NoSuchElementException:
             pass
@@ -324,7 +330,8 @@ class LinkareerCrawler:
         try:
             # 예: 회사 유형
             result["company_type"] = driver.find_element(
-                By.CSS_SELECTOR, 'ul[class^="CategoryChipList__"] p'
+                By.CSS_SELECTOR,
+                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(1) > dd",
             ).text.strip()
         except NoSuchElementException:
             pass
@@ -332,15 +339,20 @@ class LinkareerCrawler:
         try:
             # 조회수
             result["views"] = driver.find_element(
-                By.CSS_SELECTOR, 'span[class^="ViewCount__"]'
+                By.CSS_SELECTOR,
+                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > header > div > span:nth-child(2)",
             ).text.strip()
         except NoSuchElementException:
             pass
 
         # 주최/주관 (organization_name): 다양한 라벨을 대상으로 텍스트를 추출
-        org_name = self._extract_organization_name(driver)
-        if org_name:
-            result["organization_name"] = org_name
+        try:
+            result["organization_name"] = driver.find_element(
+                By.CSS_SELECTOR,
+                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > header > h2",
+            ).text.strip()
+        except NoSuchElementException:
+            pass
 
         return result
 
@@ -428,7 +440,7 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
         title = record.get("activity_title")
         organization = record.get("organization_name") or title or "정보없음"
         categories = record.get("activity_category") or []
-        category_str = ", ".join(categories)
+        category_str = ",".join(categories)
 
         if not (start_date and end_date and image_url and site_url and title):
             logger.warning(
