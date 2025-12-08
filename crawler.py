@@ -77,7 +77,9 @@ def parse_detail_page(html: str, url: str) -> Dict:
         "additional_benefits": safe("dl:nth-of-type(8) dd"),
         "target_participants": safe("dl:nth-of-type(2) dd"),
         "company_type": safe("dl:nth-of-type(1) dd"),
-        "views": safe("header span:nth-child(2)"),
+        "views": safe(
+            "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > header > div > span:nth-child(2)"
+        ),
     }
 
 
