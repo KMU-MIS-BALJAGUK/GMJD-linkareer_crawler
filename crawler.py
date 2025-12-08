@@ -106,7 +106,7 @@ class LinkareerCrawler:
         opts.add_argument("--window-size=1200,900")
 
         # 🔥 JS 로딩 기다리지 않도록 설정
-        opts.page_load_strategy = "none"
+        opts.page_load_strategy = "normal"
 
         # 이미지 로딩 OFF → 속도 2배
         opts.add_experimental_option(
@@ -146,7 +146,22 @@ class LinkareerCrawler:
         url = self.LIST_URL.format(page=page)
         logger.info(f"Fetching list page: {url}")
 
-        html = self.get_html(url)
+        # 페이지 로드
+        self.driver.get(url)
+
+        # 1) list-body 라는 컨테이너가 등장할 때까지 잠깐 기다림
+        #    (JS 렌더링 전이더라도 컨테이너는 먼저 HTML에 등장함)
+        try:
+            for _ in range(20):
+                html = self.driver.page_source
+                if "list-body" in html:
+                    break
+                time.sleep(0.2)
+        except Exception:
+            pass
+
+        # 2) 실제 HTML 파싱
+        html = self.driver.page_source
         if not html:
             return []
 
@@ -177,6 +192,7 @@ class LinkareerCrawler:
             logger.info(f"--- Page {page} ---")
 
             self.start()
+            time.sleep(0.5)
             urls = self.fetch_list_urls(page)
             self.stop()
 
