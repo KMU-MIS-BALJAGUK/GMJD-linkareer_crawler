@@ -154,14 +154,27 @@ class LinkareerCrawler:
 
         return result
 
+    async def _reset_context(self):
+        """context/page 리셋 (브라우저는 유지)"""
+        if self.context:
+            await self.context.close()
+
+        self.context = await self.browser.new_context(
+            viewport={"width": 1200, "height": 900},
+        )
+        self.page = await self.context.new_page()
+
     async def crawl_pages(self, max_pages=100, limit_per_page=None):
-        await self.start()
+        await self.start()  # ← browser만 켬
 
         all_data = []
-        detail_count = 0
 
-        for page in range(1, max_pages + 1):
-            urls = await self.fetch_list_page(page)
+        for page_number in range(1, max_pages + 1):
+
+            # 🔥 페이지 시작할 때 context/page 새로 만들기
+            await self._reset_context()
+
+            urls = await self.fetch_list_page(page_number)
             if not urls:
                 break
 
@@ -173,12 +186,7 @@ class LinkareerCrawler:
                 if data:
                     all_data.append(data)
 
-                detail_count += 1
-
-                # throttle
-                await self.page.wait_for_timeout(self.throttle * 1000)
-
-            logger.info(f"Finished page {page}")
+            logger.info(f"Finished page {page_number}")
 
         await self.stop()
         return all_data
