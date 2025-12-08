@@ -69,31 +69,27 @@ class LinkareerCrawler:
     def _make_driver(self):
         opts = Options()
 
-        # Chrome 실행 파일 경로 지정 (EC2)
-        opts.binary_location = "/opt/google/chrome/google-chrome"
+        opts.binary_location = "/usr/bin/google-chrome"
 
-        # headless 모드
         opts.add_argument("--headless=new")
-
-        # EC2 Linux 서버용 필수 옵션들
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--disable-software-rasterizer")
         opts.add_argument("--remote-debugging-port=9222")
-
-        # macos에서 실행할때
-        # opts.add_argument("--disable-infobars")
-
         opts.add_argument("--window-size=1200,900")
 
-        # 이미지 로딩 비활성화
         prefs = {"profile.managed_default_content_settings.images": 2}
         opts.add_experimental_option("prefs", prefs)
 
-        service = Service(ChromeDriverManager(version="143.0.7499.40").install())
-        driver = webdriver.Chrome(service=service, options=opts)
-        return driver
+        # 버전 고정 (driver_version)
+        chrome_driver_path = ChromeDriverManager(
+            driver_version="143.0.7499.40"
+        ).install()
+
+        service = Service(chrome_driver_path)
+
+        return webdriver.Chrome(service=service, options=opts)
 
     def start(self):
         """웹 드라이버 시작"""
