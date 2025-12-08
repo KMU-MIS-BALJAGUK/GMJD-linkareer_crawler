@@ -281,7 +281,7 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """
 
-            update_sql = """UPDATE contests SET start_date=%s, end_date=%s, views=%s WHERE id=%s"""
+            update_sql = """UPDATE contests SET start_date=%s, end_date=%s, views=%s, site_url=%s WHERE id=%s"""
 
             inserts = []
             updates = []
@@ -300,7 +300,15 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
                 views = int(rec.get("views") or 0)
 
                 if key in existing:
-                    updates.append((start, end, views, existing[key]))
+                    updates.append(
+                        (
+                            start,
+                            end,
+                            views,
+                            rec.get("activity_url") or rec.get("detail_url") or "",
+                            existing[key],
+                        )
+                    )
                 else:
                     inserts.append(
                         (
@@ -309,7 +317,7 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
                             img,
                             title,
                             org,
-                            rec.get("activity_url") or "",
+                            rec.get("activity_url") or rec.get("detail_url") or "",
                             start,
                             rec.get("award_scale") or "",
                             rec.get("benefits") or "",
