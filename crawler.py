@@ -71,29 +71,35 @@ class LinkareerCrawler:
 
         opts.binary_location = "/opt/google/chrome/google-chrome"
 
+        # headless + 메모리누수 방지 옵션
         opts.add_argument("--headless=new")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--disable-software-rasterizer")
-        opts.add_argument("--remote-debugging-port=9222")
+        opts.add_argument("--disable-background-timer-throttling")
+        opts.add_argument("--disable-backgrounding-occluded-windows")
+        opts.add_argument("--disable-renderer-backgrounding")
+        opts.add_argument("--disable-features=CalculateNativeWinOcclusion")
         opts.add_argument("--window-size=1200,900")
 
+        # HTML만 로딩하고 JS 렌더링은 기다리지 않음
+        opts.page_load_strategy = "none"
+
+        # 이미지 로딩 중지
         prefs = {"profile.managed_default_content_settings.images": 2}
         opts.add_experimental_option("prefs", prefs)
 
-        # 버전 고정 (driver_version)
         chrome_driver_path = ChromeDriverManager(
             driver_version="143.0.7499.40"
         ).install()
 
         service = Service(chrome_driver_path)
-
         driver = webdriver.Chrome(service=service, options=opts)
 
-        # 🔥 페이지 로드 / 스크립트 타임아웃 설정 (30초)
-        driver.set_page_load_timeout(30)
-        driver.set_script_timeout(30)
+        # 타임아웃 설정
+        driver.set_page_load_timeout(15)
+        driver.set_script_timeout(15)
 
         return driver
 
@@ -183,10 +189,10 @@ class LinkareerCrawler:
         logger.info("Visiting detail page: %s", detail_url)
 
         try:
-            # 🔥 새 탭 대신 같은 탭에서 직접 이동
             driver.get(detail_url)
 
-            wait = WebDriverWait(driver, self.wait_time)
+            # JS 렌더링까지 기다릴 필요 없음 — 가장 중요한 요소만 대기
+            wait = WebDriverWait(driver, 10)
             wait.until(
                 EC.presence_of_element_located(
                     (By.CSS_SELECTOR, "header[class^='ActivityInformationHeader__']")
@@ -354,13 +360,24 @@ class LinkareerCrawler:
 
             return result
 
-        except TimeoutException as e:
-            logger.warning("Timeout when opening detail page %s: %s", detail_url, e)
+        except TimeoutException:
+            logger.warning("Timeout — restarting Chrome driver.")
+            self.stop()
+            self.start()
             return None
 
         except WebDriverException as e:
-            logger.error("WebDriverException on detail %s: %s", detail_url, e)
+            logger.error("Chrome crashed (%s). Restarting...", str(e)[:200])
+            self.stop()
+            self.start()
             return None
+
+        finally:
+            # DOM 히스토리/메모리 비우기 (매우 중요!)
+            try:
+                driver.get("about:blank")
+            except:
+                pass
 
     def _extract_organization_name(self, driver) -> Optional[str]:
         """상세 페이지 내 주최/주관 정보를 추출"""
@@ -459,53 +476,48 @@ class LinkareerCrawler:
     def crawl_pages_by_click(
         self, max_pages: int = 100, per_page_limit: Optional[int] = None
     ):
-        """
-        페이지 버튼 클릭 기반 크롤링 (React 기반 페이지 전환 지원)
-        Args:
-            max_pages (int): 최대 몇 개의 페이지를 크롤링할지
-            per_page_limit (Optional[int]): 한 페이지에서 몇 개의 상세만 크롤링할지 (None이면 전체)
-        """
         self.start()
 
-        # -----------------------------------------
-        # ✅ 최초 페이지 직접 접근 (중요!!)
-        # -----------------------------------------
         first_url = f"{self.Newest_Url}1"
         logger.info(f"Opening initial list page: {first_url}")
         self.driver.get(first_url)
 
-        # React 렌더링 기다림
         WebDriverWait(self.driver, self.wait_time).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
         )
         time.sleep(1)
 
         collected = []
+        detail_count = 0  # 🔥 상세 페이지 방문 카운터
 
         for _ in range(max_pages):
 
-            # -----------------------------
-            # 1) 현재 페이지의 리스트에서 URL 가져오기
-            # -----------------------------
-            urls = self.fetch_activity_urls()  # URL?page=N 방식 미사용
+            urls = self.fetch_activity_urls()
             if not urls:
                 break
 
-            prev_first = urls[0]  # 다음 페이지 로딩 완료 여부 판단용
-
-            # -----------------------------
-            # 2) 상세 페이지 크롤링
-            # -----------------------------
+            prev_first = urls[0]
             limit = per_page_limit or len(urls)
 
             for url in urls[:limit]:
+
+                # 🔥 Chrome 안정성 유지: 20개마다 driver 재시작
+                if detail_count > 0 and detail_count % 20 == 0:
+                    logger.info("Restarting driver to prevent memory leak...")
+                    self.stop()
+                    self.start()
+
+                    # 리스트 페이지 다시 열기 + 스크롤 위치 유지
+                    self.driver.get(first_url)
+                    time.sleep(1)
+
                 details = self.fetch_activity_details(url)
+                detail_count += 1
+
                 if details:
                     collected.append(details)
 
-            # -----------------------------
-            # 3) 다음 페이지 클릭 (없으면 종료)
-            # -----------------------------
+            # 다음 페이지 이동
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_all_elements_located(
                     (By.CSS_SELECTOR, "button.button-page-number")
@@ -515,9 +527,6 @@ class LinkareerCrawler:
             if not self.go_to_next_page():
                 break
 
-            # -----------------------------
-            # 4) 다음 페이지 로딩 안정화 대기
-            # -----------------------------
             self.wait_for_list_update(prev_first)
 
         self.stop()
