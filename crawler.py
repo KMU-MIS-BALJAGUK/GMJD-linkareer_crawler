@@ -91,7 +91,7 @@ class LinkareerCrawler:
         prefs = {"profile.managed_default_content_settings.images": 2}
         opts.add_experimental_option("prefs", prefs)
 
-        service = Service(ChromeDriverManager().install())
+        service = Service(ChromeDriverManager(version="143.0.7499.40").install())
         driver = webdriver.Chrome(service=service, options=opts)
         return driver
 
