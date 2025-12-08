@@ -6,6 +6,7 @@ import time
 from datetime import date, datetime
 from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+from datetime import datetime, timedelta
 
 import pymysql
 from dotenv import load_dotenv
@@ -329,7 +330,9 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
                     )
 
             # 종료된 공모전 삭제
-            cursor.execute("DELETE FROM contests WHERE end_date < CURDATE()")
+            kst_today = (datetime.utcnow() + timedelta(hours=9)).date()
+
+            cursor.execute("DELETE FROM contests WHERE end_date < %s", (kst_today,))
 
             if inserts:
                 cursor.executemany(insert_sql, inserts)
