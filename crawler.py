@@ -6,7 +6,7 @@ from datetime import datetime, date
 from typing import List, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
-from playwright_stealth import stealth
+from playwright_stealth import stealth_async
 
 import pymysql
 from dotenv import load_dotenv
@@ -41,22 +41,25 @@ class LinkareerCrawler:
             headless=headless,
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
                 "--no-sandbox",
+                "--disable-dev-shm-usage",
             ],
         )
 
         self.context = await self.browser.new_context(
             viewport={"width": 1600, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/121.0.0.0 Safari/537.36",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
             locale="ko-KR",
             timezone_id="Asia/Seoul",
         )
 
         self.page = await self.context.new_page()
-        await stealth(self.page)
+
+        await stealth_async(self.page)
 
     async def stop(self):
         """Playwright Browser 종료"""
