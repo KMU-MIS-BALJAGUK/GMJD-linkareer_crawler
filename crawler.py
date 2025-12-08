@@ -1,407 +1,313 @@
+from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, date
-from typing import List, Dict, Optional
+import time
+from datetime import date, datetime
+from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
 import pymysql
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
-import asyncio
+
+# --- Selenium & BS4 ---
+from selenium import webdriver
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+
+from bs4 import BeautifulSoup
+
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger("LinkareerCrawler")
-
 load_dotenv()
 
-DEFAULT_WAIT = 8000  # ms
+DEFAULT_WAIT = 10
 
 
+# -----------------------------------------------------------
+# 1) BeautifulSoup 기반 HTML 파서
+# -----------------------------------------------------------
+def parse_list_page(html: str) -> List[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    urls = []
+
+    for a in soup.select("div.list-body a[href^='/activity/']"):
+        href = a.get("href")
+        if href:
+            urls.append(urljoin("https://linkareer.com", href))
+
+    return list(dict.fromkeys(urls))  # unique 유지
+
+
+def parse_detail_page(html: str, url: str) -> Dict:
+    soup = BeautifulSoup(html, "html.parser")
+
+    safe = lambda q: (
+        soup.select_one(q).get_text(strip=True) if soup.select_one(q) else None
+    )
+    safe_attr = lambda q, a: (soup.select_one(q).get(a) if soup.select_one(q) else None)
+
+    categories = [
+        p.get_text(strip=True) for p in soup.select("ul[class^='CategoryChipList__'] p")
+    ]
+
+    return {
+        "detail_url": url,
+        "activity_title": safe("header[class^='ActivityInformationHeader__'] h1"),
+        "activity_url": safe_attr("dl[class^='HomepageField__'] a", "href"),
+        "activity_category": categories,
+        "start_date": safe(".start-at + span"),
+        "end_date": safe(".end-at + span"),
+        "activity_img": safe_attr("img.card-image", "src")
+        or safe_attr("div.poster img", "src"),
+        "organization_name": safe("div > article > header > h2"),
+        # Optional fields
+        "award_scale": safe("dl:nth-of-type(3) dd"),
+        "benefits": safe("dl:nth-of-type(6) dd"),
+        "additional_benefits": safe("dl:nth-of-type(8) dd"),
+        "target_participants": safe("dl:nth-of-type(2) dd"),
+        "company_type": safe("dl:nth-of-type(1) dd"),
+        "views": safe("header span:nth-child(2)"),
+    }
+
+
+# -----------------------------------------------------------
+# 2) Selenium 최소 로딩 구조
+# -----------------------------------------------------------
 class LinkareerCrawler:
     BASE_URL = "https://linkareer.com"
     LIST_URL = (
-        "https://linkareer.com/list/contest"
-        "?filterType=CATEGORY&orderBy_direction=DESC&orderBy_field=CREATED_AT&page={page}"
+        BASE_URL
+        + "/list/contest?filterType=CATEGORY&orderBy_direction=DESC&orderBy_field=CREATED_AT&page={page}"
     )
 
-    def __init__(self, throttle: float = 0.3):
-        self.browser = None
-        self.context = None
-        self.throttle = throttle
+    def __init__(self, headless=True):
+        self.headless = headless
+        self.driver = None
 
-    async def start(self, headless=True):
-        playwright = await async_playwright().start()
+    def _make_driver(self):
+        opts = Options()
+        opts.binary_location = "/opt/google/chrome/google-chrome"
+        opts.add_argument("--headless=new")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--window-size=1200,900")
 
-        self.browser = await playwright.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+        # 🔥 JS 로딩 기다리지 않도록 설정
+        opts.page_load_strategy = "none"
+
+        # 이미지 로딩 OFF → 속도 2배
+        opts.add_experimental_option(
+            "prefs", {"profile.managed_default_content_settings.images": 2}
         )
 
-        # Anti-Bot 효과 극대화
-        self.context = await self.browser.new_context(
-            viewport={"width": 1600, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            locale="ko-KR",
-            timezone_id="Asia/Seoul",
-            java_script_enabled=True,
-        )
+        service = Service(ChromeDriverManager(driver_version="143.0.7499.40").install())
+        return webdriver.Chrome(service=service, options=opts)
 
-        self.page = await self.context.new_page()
+    def start(self):
+        self.driver = self._make_driver()
 
-        # -----------------------
-        # Stealth 없이 Anti-Bot 우회
-        # -----------------------
-        await self.page.add_init_script(
-            """
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
-            window.navigator.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1,2,3],
-            });
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['ko-KR', 'ko'],
-            });
-        """
-        )
-
-    async def stop(self):
-        """Playwright Browser 종료"""
-        if self.browser:
-            await self.browser.close()
-            self.browser = None
-            logger.info("Browser closed.")
-
-    async def fetch_list_page(self, page_number: int) -> List[str]:
-        url = self.LIST_URL.format(page=page_number)
-        logger.info(f"Opening list page: {url}")
-
-        try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        except PlaywrightTimeout:
-            logger.warning(f"Timeout while opening list page: {url}")
-            return []
-
-        # div.list-body 대기 (대기시간 충분히)
-        try:
-            await self.page.wait_for_selector("div.list-body", timeout=20000)
-        except PlaywrightTimeout:
-            logger.error("list-body not found — page load failed")
-            return []
-
-        anchors = await self.page.locator("div.list-body a[href^='/activity/']").all()
-
-        urls = []
-        seen = set()
-
-        for a in anchors:
+    def stop(self):
+        if self.driver:
             try:
-                href = await a.get_attribute("href")
-            except PlaywrightTimeout:
-                continue
-            if href:
-                full = urljoin(self.BASE_URL, href)
-                if full not in seen:
-                    seen.add(full)
-                    urls.append(full)
-
-        logger.info(f"Found {len(urls)} activity URLs on page {page_number}")
-        return urls
-
-    async def fetch_activity_details(self, url: str) -> Optional[Dict]:
-        """2) 상세 페이지 스크랩"""
-
-        logger.info(f"Visiting detail page: {url}")
-
-        try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        except PlaywrightTimeout:
-            logger.error(f"Timeout loading detail page: {url}")
-            return None
-
-        try:
-            await self.page.wait_for_selector(
-                "header[class^='ActivityInformationHeader__']"
-            )
-        except PlaywrightTimeout:
-            logger.warning(f"No title header found — skipping: {url}")
-            return None
-
-        async def safe(selector: str):
-            try:
-                return await self.page.locator(selector, strict=False).inner_text(
-                    timeout=2000
-                )
-            except:
-                return None
-
-        async def safe_attr(selector: str, attr: str):
-            try:
-                return self.page.locator(selector, strict=False).get_attribute(
-                    attr, timeout=2000
-                )
-            except:
-                return None
-
-        # Playwright는 await 필요
-        result = {
-            "detail_url": url,
-            "activity_title": await safe(
-                "header[class^='ActivityInformationHeader__'] h1"
-            ),
-            "activity_url": await safe_attr("dl[class^='HomepageField__'] a", "href"),
-            "activity_category": [],
-            "start_date": await safe(".start-at + span"),
-            "end_date": await safe(".end-at + span"),
-            "activity_img": await safe_attr("img.card-image", "src"),
-            "organization_name": await safe("div > article > header > h2"),
-            # Optional Fields
-            "award_scale": await safe("dl:nth-of-type(3) dd"),
-            "benefits": await safe("dl:nth-of-type(6) dd"),
-            "target_participants": await safe("dl:nth-of-type(2) dd"),
-            "company_type": await safe("dl:nth-of-type(1) dd"),
-            "views": await safe("header span:nth-child(2)"),
-        }
-
-        # categories
-        cat_elements = self.page.locator("ul[class^='CategoryChipList__'] p")
-        count = await cat_elements.count()
-        categories = []
-        for i in range(count):
-            txt = await cat_elements.nth(i).inner_text()
-            if txt:
-                categories.append(txt)
-        result["activity_category"] = categories
-
-        return result
-
-    async def _reset_context(self):
-        if self.context:
-            try:
-                await self.context.close()
+                self.driver.quit()
             except:
                 pass
+            self.driver = None
 
-        self.context = await self.browser.new_context(
-            viewport={"width": 1200, "height": 900}
-        )
-        self.page = await self.context.new_page()
+    # -----------------------------------------------------------
+    # 페이지 HTML만 빠르게 가져오기
+    # -----------------------------------------------------------
+    def get_html(self, url: str) -> Optional[str]:
+        try:
+            self.driver.get(url)
+            time.sleep(0.7)  # JS렌더링 기다리지 않음 → 최소 대기만
+            return self.driver.page_source
+        except Exception as e:
+            logger.error("Error loading %s: %s", url, e)
+            return None
 
-    async def crawl_pages(self, max_pages=100, limit_per_page=None):
-        await self.start()  # 브라우저만 실행
+    # -----------------------------------------------------------
+    # 리스트 페이지 > detail URL들 추출
+    # -----------------------------------------------------------
+    def fetch_list_urls(self, page: int) -> List[str]:
+        url = self.LIST_URL.format(page=page)
+        logger.info(f"Fetching list page: {url}")
 
-        all_data = []
+        html = self.get_html(url)
+        if not html:
+            return []
 
-        for page_number in range(1, max_pages + 1):
+        urls = parse_list_page(html)
+        logger.info("Found %d URLs on page %d", len(urls), page)
+        return urls
 
-            # 🔥 페이지 시작할 때 context/page 새로 생성
-            await self._reset_context()
+    # -----------------------------------------------------------
+    # 상세 페이지 데이터 가져오기
+    # -----------------------------------------------------------
+    def fetch_detail(self, url: str) -> Optional[Dict]:
+        logger.info(f"Visiting detail: {url}")
 
-            urls = await self.fetch_list_page(page_number)
+        html = self.get_html(url)
+        if not html:
+            return None
+
+        data = parse_detail_page(html, url)
+        return data
+
+    # -----------------------------------------------------------
+    # 전체 페이지 크롤링
+    # -----------------------------------------------------------
+    def crawl(self, max_pages=50, limit_per_page=None):
+        records = []
+
+        for page in range(1, max_pages + 1):
+            logger.info(f"--- Page {page} ---")
+
+            self.start()
+            urls = self.fetch_list_urls(page)
+            self.stop()
+
             if not urls:
-                logger.warning(f"No URLs found on page {page_number}. Stopping.")
+                logger.info("No URLs found. Stopping.")
                 break
 
             if limit_per_page:
                 urls = urls[:limit_per_page]
 
+            # 상세 페이지는 다시 Selenium 실행
+            self.start()
+
             for url in urls:
-                data = await self.fetch_activity_details(url)
+                data = self.fetch_detail(url)
                 if data:
-                    all_data.append(data)
+                    records.append(data)
 
-                await self.page.wait_for_timeout(self.throttle * 1000)
+            self.stop()
 
-            logger.info(f"Finished page {page_number}")
-
-        await self.stop()
-        return all_data
+        return records
 
 
-def _parse_date(date_str: Optional[str]) -> Optional[date]:
+# -----------------------------------------------------------
+# 3) 날짜 파싱
+# -----------------------------------------------------------
+def _parse_date(date_str: Optional[str]):
     if not date_str:
         return None
     try:
         return datetime.strptime(date_str, "%Y.%m.%d").date()
-    except ValueError:
-        logger.warning("Cannot parse date: %s", date_str)
+    except:
         return None
 
 
-def _get_required_env(var_name: str) -> str:
-    value = os.getenv(var_name)
-    if not value:
-        raise RuntimeError(f"Environment variable {var_name} is required")
-    return value
-
-
-def _parse_mysql_url(url: str) -> tuple[str, int, str]:
-    """jdbc:mysql://host:port/db 형태를 host, port, db 로 파싱"""
-    if url.startswith("jdbc:"):
-        url = url[len("jdbc:") :]
-    parsed = urlparse(url)
-    host = parsed.hostname
-    port = parsed.port or 3306
-    database = parsed.path.lstrip("/") if parsed.path else None
-    if not host or not database:
-        raise RuntimeError(
-            "RDS_URL must include host and database, e.g. mysql://host:3306/dbname"
-        )
-    return host, port, database
-
-
+# -----------------------------------------------------------
+# 4) DB 저장
+# -----------------------------------------------------------
 def persist_contests_to_rds(records: List[Dict]) -> None:
     if not records:
-        logger.info("No records to persist. Skipping DB update")
+        logger.info("No records to persist.")
         return
 
-    host, port, database = _parse_mysql_url(_get_required_env("RDS_URL"))
-    if os.getenv("RDS_PORT"):
-        port = int(os.getenv("RDS_PORT"))
-    user = _get_required_env("RDS_USERNAME")
-    password = _get_required_env("RDS_PASSWORD")
-    if os.getenv("RDS_DB_NAME"):
-        database = os.getenv("RDS_DB_NAME")
+    host, port, db = _parse_mysql_url(os.getenv("RDS_URL"))
+    user = os.getenv("RDS_USERNAME")
+    password = os.getenv("RDS_PASSWORD")
 
-    connection = pymysql.connect(
+    conn = pymysql.connect(
         host=host,
         port=port,
         user=user,
         password=password,
-        database=database,
+        database=db,
         charset="utf8mb4",
         autocommit=False,
     )
 
-    with connection:
-        with connection.cursor() as cursor:
-
-            # ============================================================
-            # 1️⃣ 현재 DB에 존재하는 contest 목록 로딩
-            # ============================================================
+    with conn:
+        with conn.cursor() as cursor:
             cursor.execute("SELECT id, name, organization_name FROM contests")
-            existing_rows = cursor.fetchall()
+            existing = {(r[1], r[2]): r[0] for r in cursor.fetchall()}
 
-            existing_map = {
-                (row[1], row[2]): row[0]  # (name, organization_name) → id
-                for row in existing_rows
-            }
-
-            logger.info("Loaded %d existing contests from DB", len(existing_map))
-
-            # ============================================================
-            # 2️⃣ INSERT or UPDATE 로직 적용
-            # ============================================================
             insert_sql = """
-                INSERT INTO contests (
-                    categories, end_date, image_url, name, organization_name, site_url, start_date,
-                    award_scale, benefits, additional_benefits, target_participants, company_type, views
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO contests categories, end_date, image_url, name, organization_name,
+                site_url, start_date, award_scale, benefits, additional_benefits,
+                target_participants, company_type, views
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """
 
-            update_sql = """
-                UPDATE contests
-                SET start_date = %s,
-                    end_date   = %s,
-                    views      = %s
-                WHERE id = %s
-            """
+            update_sql = """UPDATE contests SET start_date=%s, end_date=%s, views=%s WHERE id=%s"""
 
-            insert_payloads = []
-            update_payloads = []
+            inserts = []
+            updates = []
 
-            for record in records:
-                start_date = _parse_date(record.get("start_date"))
-                end_date = _parse_date(record.get("end_date"))
-                image_url = record.get("activity_img")
-                site_url = record.get("activity_url") or record.get("detail_url")
-                title = record.get("activity_title")
-                organization = record.get("organization_name") or title or "정보없음"
-                categories = record.get("activity_category") or []
-                category_str = ",".join(categories)
-                views = int(record.get("views") or 0)
+            for rec in records:
+                start = _parse_date(rec.get("start_date"))
+                end = _parse_date(rec.get("end_date"))
+                img = rec.get("activity_img")
+                title = rec.get("activity_title")
+                org = rec.get("organization_name") or "정보없음"
 
-                if not (start_date and end_date and image_url and site_url and title):
-                    logger.warning(
-                        "Skipping invalid record: %s", record.get("detail_url")
-                    )
+                if not (start and end and img and title):
                     continue
 
-                key = (title, organization)
+                key = (title, org)
+                views = int(rec.get("views") or 0)
 
-                # ====================================================
-                # 존재 여부 체크 → UPDATE or INSERT
-                # ====================================================
-                if key in existing_map:
-                    contest_id = existing_map[key]
-                    update_payloads.append((start_date, end_date, views, contest_id))
+                if key in existing:
+                    updates.append((start, end, views, existing[key]))
                 else:
-                    insert_payloads.append(
+                    inserts.append(
                         (
-                            category_str,
-                            end_date,
-                            image_url,
+                            ",".join(rec.get("activity_category", [])),
+                            end,
+                            img,
                             title,
-                            organization,
-                            site_url,
-                            start_date,
-                            record.get("award_scale") or "",
-                            record.get("benefits") or "",
-                            record.get("additional_benefits") or "",
-                            record.get("target_participants") or "",
-                            record.get("company_type") or "",
+                            org,
+                            rec.get("detail_url"),
+                            start,
+                            rec.get("award_scale") or "",
+                            rec.get("benefits") or "",
+                            rec.get("additional_benefits") or "",
+                            rec.get("target_participants") or "",
+                            rec.get("company_type") or "",
                             views,
                         )
                     )
 
-            # ============================================================
-            # 3️⃣ INSERT 실행
-            # ============================================================
-            if insert_payloads:
-                cursor.executemany(insert_sql, insert_payloads)
-                logger.info("Inserted %d new contests", len(insert_payloads))
+            if inserts:
+                cursor.executemany(insert_sql, inserts)
+            if updates:
+                cursor.executemany(update_sql, updates)
 
-            # ============================================================
-            # 4️⃣ UPDATE 실행
-            # ============================================================
-            if update_payloads:
-                cursor.executemany(update_sql, update_payloads)
-                logger.info("Updated %d existing contests", len(update_payloads))
-
-            connection.commit()
+            conn.commit()
 
 
-import asyncio
-
-
+# -----------------------------------------------------------
+# 5) Main
+# -----------------------------------------------------------
 def main():
-    max_pages = int(os.getenv("LINKAREER_PAGE_LIMIT", "100"))
-    per_page_limit_env = os.getenv("LINKAREER_PER_PAGE_LIMIT")
-    per_page_limit = int(per_page_limit_env) if per_page_limit_env else None
+    crawler = LinkareerCrawler(headless=True)
 
-    crawler = LinkareerCrawler()
-
-    records = asyncio.run(
-        crawler.crawl_pages(max_pages=max_pages, limit_per_page=per_page_limit)
+    records = crawler.crawl(
+        max_pages=int(os.getenv("LINKAREER_PAGE_LIMIT", 50)),
+        limit_per_page=int(os.getenv("LINKAREER_PER_PAGE_LIMIT", 28)),
     )
 
-    logging.info(f"Collected {len(records)} contest items")
+    logger.info(f"Collected {len(records)} items")
 
-    if os.getenv("SKIP_DB_WRITE", "false").lower() == "true":
-        print(json.dumps(records[:2], indent=4, ensure_ascii=False))
+    if os.getenv("SKIP_DB_WRITE", "false") == "true":
+        print(json.dumps(records[:3], indent=4, ensure_ascii=False))
         return
 
     persist_contests_to_rds(records)
