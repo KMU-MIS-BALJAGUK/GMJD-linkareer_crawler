@@ -57,13 +57,12 @@ class LinkareerCrawler:
         logger.info(f"Opening list page: {url}")
 
         try:
-            # networkidle -> domcontentloaded 로 변경
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
         except PlaywrightTimeout:
             logger.warning(f"Timeout while opening list page: {url}")
             return []
 
-        # 실제 렌더링 요소를 기다림
+        # 리스트가 로딩될 때까지 대기
         await self.page.wait_for_selector("div.list-body", timeout=DEFAULT_WAIT)
 
         anchors = await self.page.locator("div.list-body a[href^='/activity/']").all()
@@ -72,9 +71,14 @@ class LinkareerCrawler:
         seen = set()
 
         for a in anchors:
-            href = await a.get_attribute("href")
+            try:
+                href = await a.get_attribute("href", timeout=2000)
+            except Exception:
+                continue  # attribute 못 가져오면 skip
+
             if not href:
                 continue
+
             full = urljoin(self.BASE_URL, href)
             if full not in seen:
                 seen.add(full)
