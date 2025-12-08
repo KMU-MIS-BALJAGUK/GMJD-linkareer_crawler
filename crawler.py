@@ -89,7 +89,13 @@ class LinkareerCrawler:
 
         service = Service(chrome_driver_path)
 
-        return webdriver.Chrome(service=service, options=opts)
+        driver = webdriver.Chrome(service=service, options=opts)
+
+        # 🔥 페이지 로드 / 스크립트 타임아웃 설정 (30초)
+        driver.set_page_load_timeout(30)
+        driver.set_script_timeout(30)
+
+        return driver
 
     def start(self):
         """웹 드라이버 시작"""
@@ -187,185 +193,214 @@ class LinkareerCrawler:
         driver = self.driver
         logger.info("Visiting detail page: %s", detail_url)
 
-        # 🔥 새 탭 열기
-        driver.execute_script(f"window.open('{detail_url}', '_blank');")
-        driver.switch_to.window(driver.window_handles[-1])
+        original_handle = driver.current_window_handle
 
-        wait = WebDriverWait(driver, self.wait_time)
         try:
-            wait.until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "header[class^='ActivityInformationHeader__']")
+            # 🔥 새 탭 열기 시도
+            driver.execute_script(f"window.open('{detail_url}', '_blank');")
+
+            # 가장 마지막 탭(방금 연 탭)으로 이동
+            driver.switch_to.window(driver.window_handles[-1])
+
+            wait = WebDriverWait(driver, self.wait_time)
+            try:
+                wait.until(
+                    EC.presence_of_element_located(
+                        (
+                            By.CSS_SELECTOR,
+                            "header[class^='ActivityInformationHeader__']",
+                        )
+                    )
                 )
-            )
-        except TimeoutException:
-            logger.warning("Timeout waiting for detail page to render: %s", detail_url)
+            except TimeoutException:
+                logger.warning(
+                    "Timeout waiting for detail page to render: %s", detail_url
+                )
+                # 이 상세 페이지는 스킵
+                return None
+
+            time.sleep(self.throttle)
+
+            # 결과를 저장할 딕셔너리를 기본값으로 초기화
+            result = {
+                "activity_title": None,
+                "activity_url": None,
+                "activity_category": [],
+                "start_date": None,
+                "end_date": None,
+                "activity_img": None,
+                "organization_name": None,
+                "detail_url": detail_url,
+                # --- 추가해야 하는 필드들 ---
+                "award_scale": None,
+                "benefits": None,
+                "additional_benefits": None,
+                "target_participants": None,
+                "company_type": None,
+                "views": None,
+            }
+
+            # --- 각 필드 스크래핑 시작 ---
+
+            # 제목 (activity_title): 헤더(<header>) 안의 <h1> 태그에서 텍스트 추출
+            try:
+                # ActivityInformationHeader__로 시작하는 class의 h1
+                title_element = driver.find_element(
+                    By.CSS_SELECTOR, "header[class^='ActivityInformationHeader__'] h1"
+                )
+                result["activity_title"] = title_element.text.strip()
+            except NoSuchElementException:
+                logger.debug("Title not found on %s", detail_url)
+
+            # 홈페이지 URL (activity_url): 'HomepageField' 클래스로 시작하는 <dl> 내부의 <a> 태그에서 href 속성 추출
+            try:
+                home_anchor = driver.find_element(
+                    By.CSS_SELECTOR, "dl[class^='HomepageField__'] a"
+                )
+                result["activity_url"] = home_anchor.get_attribute("href")
+            except NoSuchElementException:
+                logger.debug("Homepage/activity_url not found on %s", detail_url)
+
+            # 카테고리 (activity_category): 카테고리 칩 목록 내부의 모든 <p> 태그 텍스트를 가져와 '/' 기준으로 분리하고, 하나의 리스트로 만듭니다.
+            try:
+                category_elements = driver.find_elements(
+                    By.CSS_SELECTOR, "ul[class^='CategoryChipList__'] p"
+                )
+
+                categories = []
+                for p_element in category_elements:
+                    text = p_element.text.strip()
+                    if text:
+                        categories.append(text)  # split 하지 않음!
+
+                result["activity_category"] = categories
+
+            except NoSuchElementException:
+                logger.debug("Category not found on %s", detail_url)
+
+            # 접수 시작일 (start_date): 'start-at' 클래스를 가진 <span> 태그의 텍스트를 추출
+            try:
+                result["start_date"] = driver.find_element(
+                    By.CSS_SELECTOR, ".start-at + span"
+                ).text.strip()
+            except NoSuchElementException:
+                logger.debug("Start date not found on %s", detail_url)
+
+            # 접수 마감일 (end_date): 'end-at' 클래스를 가진 <span> 태그의 텍스트를 추출
+            try:
+                result["end_date"] = driver.find_element(
+                    By.CSS_SELECTOR, ".end-at + span"
+                ).text.strip()
+            except NoSuchElementException:
+                logger.debug("End date not found on %s", detail_url)
+
+            # 대표 이미지 (activity_img): 'card-image' 클래스 <img> 태그의 src 속성을 추출
+            try:
+                result["activity_img"] = driver.find_element(
+                    By.CSS_SELECTOR, "img.card-image"
+                ).get_attribute("src")
+            except NoSuchElementException:
+                logger.debug("img.card-image not found, trying fallback selector.")
+                try:
+                    poster_img = driver.find_element(
+                        By.CSS_SELECTOR, "div.poster > img"
+                    )
+                    result["activity_img"] = poster_img.get_attribute("src")
+                except NoSuchElementException:
+                    logger.debug("Activity image not found on %s", detail_url)
+
+            # --- 추가 항목들 수집 (CSS_SELECTOR는 직접 넣어야 함) ---
+
+            try:
+                # 예: 상금 규모
+                result["award_scale"] = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(3) > dd",
+                ).text.strip()
+            except NoSuchElementException:
+                pass
+
+            try:
+                # 예: 혜택
+                result["benefits"] = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(6) > dd",
+                ).text.strip()
+            except NoSuchElementException:
+                pass
+
+            try:
+                # 예: 추가 혜택
+                result["additional_benefits"] = driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(8) > dd",
+                )
+                # 배열 형태일 수 있으므로 join 처리
+                result["additional_benefits"] = ", ".join(
+                    [el.text.strip() for el in result["additional_benefits"]]
+                )
+            except NoSuchElementException:
+                pass
+
+            try:
+                # 예: 참가 대상
+                result["target_participants"] = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(2) > dd",
+                ).text.strip()
+            except NoSuchElementException:
+                pass
+
+            try:
+                # 예: 회사 유형
+                result["company_type"] = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(1) > dd",
+                ).text.strip()
+            except NoSuchElementException:
+                pass
+
+            try:
+                # 조회수
+                result["views"] = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > header > div > span:nth-child(2)",
+                ).text.strip()
+            except NoSuchElementException:
+                pass
+
+            # 주최/주관 (organization_name): 다양한 라벨을 대상으로 텍스트를 추출
+            try:
+                result["organization_name"] = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > header > h2",
+                ).text.strip()
+            except NoSuchElementException:
+                pass
+
+            return result
+
+        except TimeoutException as e:
+            logger.warning("Timeout when opening detail page %s: %s", detail_url, e)
             return None
 
-        time.sleep(self.throttle)
+        except WebDriverException as e:
+            logger.error("WebDriverException on detail %s: %s", detail_url, e)
+            return None
 
-        # 결과를 저장할 딕셔너리를 기본값으로 초기화
-        result = {
-            "activity_title": None,
-            "activity_url": None,
-            "activity_category": [],
-            "start_date": None,
-            "end_date": None,
-            "activity_img": None,
-            "organization_name": None,
-            "detail_url": detail_url,
-            # --- 추가해야 하는 필드들 ---
-            "award_scale": None,
-            "benefits": None,
-            "additional_benefits": None,
-            "target_participants": None,
-            "company_type": None,
-            "views": None,
-        }
-
-        # --- 각 필드 스크래핑 시작 ---
-
-        # 제목 (activity_title): 헤더(<header>) 안의 <h1> 태그에서 텍스트 추출
-        try:
-            # ActivityInformationHeader__로 시작하는 class의 h1
-            title_element = driver.find_element(
-                By.CSS_SELECTOR, "header[class^='ActivityInformationHeader__'] h1"
-            )
-            result["activity_title"] = title_element.text.strip()
-        except NoSuchElementException:
-            logger.debug("Title not found on %s", detail_url)
-
-        # 홈페이지 URL (activity_url): 'HomepageField' 클래스로 시작하는 <dl> 내부의 <a> 태그에서 href 속성 추출
-        try:
-            home_anchor = driver.find_element(
-                By.CSS_SELECTOR, "dl[class^='HomepageField__'] a"
-            )
-            result["activity_url"] = home_anchor.get_attribute("href")
-        except NoSuchElementException:
-            logger.debug("Homepage/activity_url not found on %s", detail_url)
-
-        # 카테고리 (activity_category): 카테고리 칩 목록 내부의 모든 <p> 태그 텍스트를 가져와 '/' 기준으로 분리하고, 하나의 리스트로 만듭니다.
-        try:
-            category_elements = driver.find_elements(
-                By.CSS_SELECTOR, "ul[class^='CategoryChipList__'] p"
-            )
-
-            categories = []
-            for p_element in category_elements:
-                text = p_element.text.strip()
-                if text:
-                    categories.append(text)  # split 하지 않음!
-
-            result["activity_category"] = categories
-
-        except NoSuchElementException:
-            logger.debug("Category not found on %s", detail_url)
-
-        # 접수 시작일 (start_date): 'start-at' 클래스를 가진 <span> 태그의 텍스트를 추출
-        try:
-            result["start_date"] = driver.find_element(
-                By.CSS_SELECTOR, ".start-at + span"
-            ).text.strip()
-        except NoSuchElementException:
-            logger.debug("Start date not found on %s", detail_url)
-
-        # 접수 마감일 (end_date): 'end-at' 클래스를 가진 <span> 태그의 텍스트를 추출
-        try:
-            result["end_date"] = driver.find_element(
-                By.CSS_SELECTOR, ".end-at + span"
-            ).text.strip()
-        except NoSuchElementException:
-            logger.debug("End date not found on %s", detail_url)
-
-        # 대표 이미지 (activity_img): 'card-image' 클래스 <img> 태그의 src 속성을 추출
-        try:
-            result["activity_img"] = driver.find_element(
-                By.CSS_SELECTOR, "img.card-image"
-            ).get_attribute("src")
-        except NoSuchElementException:
-            logger.debug("img.card-image not found, trying fallback selector.")
+        finally:
+            # 🔥 리스트 탭만 남기도록 나머지 탭 정리
             try:
-                poster_img = driver.find_element(By.CSS_SELECTOR, "div.poster > img")
-                result["activity_img"] = poster_img.get_attribute("src")
-            except NoSuchElementException:
-                logger.debug("Activity image not found on %s", detail_url)
-
-        # --- 추가 항목들 수집 (CSS_SELECTOR는 직접 넣어야 함) ---
-
-        try:
-            # 예: 상금 규모
-            result["award_scale"] = driver.find_element(
-                By.CSS_SELECTOR,
-                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(3) > dd",
-            ).text.strip()
-        except NoSuchElementException:
-            pass
-
-        try:
-            # 예: 혜택
-            result["benefits"] = driver.find_element(
-                By.CSS_SELECTOR,
-                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(6) > dd",
-            ).text.strip()
-        except NoSuchElementException:
-            pass
-
-        try:
-            # 예: 추가 혜택
-            result["additional_benefits"] = driver.find_elements(
-                By.CSS_SELECTOR,
-                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(8) > dd",
-            )
-            # 배열 형태일 수 있으므로 join 처리
-            result["additional_benefits"] = ", ".join(
-                [el.text.strip() for el in result["additional_benefits"]]
-            )
-        except NoSuchElementException:
-            pass
-
-        try:
-            # 예: 참가 대상
-            result["target_participants"] = driver.find_element(
-                By.CSS_SELECTOR,
-                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(2) > dd",
-            ).text.strip()
-        except NoSuchElementException:
-            pass
-
-        try:
-            # 예: 회사 유형
-            result["company_type"] = driver.find_element(
-                By.CSS_SELECTOR,
-                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(1) > dd",
-            ).text.strip()
-        except NoSuchElementException:
-            pass
-
-        try:
-            # 조회수
-            result["views"] = driver.find_element(
-                By.CSS_SELECTOR,
-                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > header > div > span:nth-child(2)",
-            ).text.strip()
-        except NoSuchElementException:
-            pass
-
-        # 주최/주관 (organization_name): 다양한 라벨을 대상으로 텍스트를 추출
-        try:
-            result["organization_name"] = driver.find_element(
-                By.CSS_SELECTOR,
-                "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > header > h2",
-            ).text.strip()
-        except NoSuchElementException:
-            pass
-
-        # 🔥 상세 페이지 탭 닫기
-        driver.close()
-
-        # 🔥 원래 목록 탭으로 돌아가기
-        driver.switch_to.window(driver.window_handles[0])
-
-        return result
+                handles = driver.window_handles
+                for h in handles:
+                    if h != original_handle:
+                        driver.switch_to.window(h)
+                        driver.close()
+                # 다시 리스트 탭으로 복귀
+                driver.switch_to.window(original_handle)
+            except Exception:
+                # 탭 정리 중 에러는 무시 (다음 루프에서 다시 정상화)
+                pass
 
     def _extract_organization_name(self, driver) -> Optional[str]:
         """상세 페이지 내 주최/주관 정보를 추출"""
