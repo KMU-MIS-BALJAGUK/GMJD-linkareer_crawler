@@ -79,7 +79,9 @@ class LinkareerCrawler:
         opts.add_argument("--disable-software-rasterizer")
         opts.add_argument("--remote-debugging-port=9222")
 
+        # macos에서 실행할때
         # opts.add_argument("--disable-infobars")
+
         opts.add_argument("--window-size=1200,900")
 
         # 이미지 로딩 비활성화
@@ -573,46 +575,6 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
     if os.getenv("RDS_DB_NAME"):
         database = os.getenv("RDS_DB_NAME")
 
-    payloads = []
-    for record in records:
-        start_date = _parse_date(record.get("start_date"))
-        end_date = _parse_date(record.get("end_date"))
-        image_url = record.get("activity_img")
-        site_url = record.get("activity_url") or record.get("detail_url")
-        title = record.get("activity_title")
-        organization = record.get("organization_name") or title or "정보없음"
-        categories = record.get("activity_category") or []
-        category_str = ",".join(categories)
-
-        if not (start_date and end_date and image_url and site_url and title):
-            logger.warning(
-                "Skipping record due to missing required fields: %s",
-                record.get("detail_url"),
-            )
-            continue
-
-        payloads.append(
-            (
-                category_str,  # categories
-                end_date,  # end_date
-                image_url,  # image_url
-                title,  # name
-                organization,  # organization_name
-                site_url,  # site_url
-                start_date,  # start_date
-                record.get("award_scale") or "",
-                record.get("benefits") or "",
-                record.get("additional_benefits") or "",
-                record.get("target_participants") or "",
-                record.get("company_type") or "",
-                int(record.get("views") or 0),
-            )
-        )
-
-    if not payloads:
-        logger.warning("No valid payloads assembled. DB write aborted")
-        return
-
     connection = pymysql.connect(
         host=host,
         port=port,
@@ -623,20 +585,102 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
         autocommit=False,
     )
 
-    # delete_sql = "TRUNCATE TABLE contests"
-    insert_sql = (
-        "INSERT INTO contests ("
-        "categories, end_date, image_url, name, organization_name, site_url, start_date, "
-        "award_scale, benefits, additional_benefits, target_participants, company_type, views"
-        ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-    )
-
     with connection:
         with connection.cursor() as cursor:
-            # cursor.execute(delete_sql)
-            cursor.executemany(insert_sql, payloads)
-        connection.commit()
-        logger.info("Persisted %d contest records to RDS", len(payloads))
+
+            # ============================================================
+            # 1️⃣ 현재 DB에 존재하는 contest 목록 로딩
+            # ============================================================
+            cursor.execute("SELECT id, name, organization_name FROM contests")
+            existing_rows = cursor.fetchall()
+
+            existing_map = {
+                (row[1], row[2]): row[0]  # (name, organization_name) → id
+                for row in existing_rows
+            }
+
+            logger.info("Loaded %d existing contests from DB", len(existing_map))
+
+            # ============================================================
+            # 2️⃣ INSERT or UPDATE 로직 적용
+            # ============================================================
+            insert_sql = """
+                INSERT INTO contests (
+                    categories, end_date, image_url, name, organization_name, site_url, start_date,
+                    award_scale, benefits, additional_benefits, target_participants, company_type, views
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+
+            update_sql = """
+                UPDATE contests
+                SET start_date = %s,
+                    end_date   = %s,
+                    views      = %s
+                WHERE id = %s
+            """
+
+            insert_payloads = []
+            update_payloads = []
+
+            for record in records:
+                start_date = _parse_date(record.get("start_date"))
+                end_date = _parse_date(record.get("end_date"))
+                image_url = record.get("activity_img")
+                site_url = record.get("activity_url") or record.get("detail_url")
+                title = record.get("activity_title")
+                organization = record.get("organization_name") or title or "정보없음"
+                categories = record.get("activity_category") or []
+                category_str = ",".join(categories)
+                views = int(record.get("views") or 0)
+
+                if not (start_date and end_date and image_url and site_url and title):
+                    logger.warning(
+                        "Skipping invalid record: %s", record.get("detail_url")
+                    )
+                    continue
+
+                key = (title, organization)
+
+                # ====================================================
+                # 존재 여부 체크 → UPDATE or INSERT
+                # ====================================================
+                if key in existing_map:
+                    contest_id = existing_map[key]
+                    update_payloads.append((start_date, end_date, views, contest_id))
+                else:
+                    insert_payloads.append(
+                        (
+                            category_str,
+                            end_date,
+                            image_url,
+                            title,
+                            organization,
+                            site_url,
+                            start_date,
+                            record.get("award_scale") or "",
+                            record.get("benefits") or "",
+                            record.get("additional_benefits") or "",
+                            record.get("target_participants") or "",
+                            record.get("company_type") or "",
+                            views,
+                        )
+                    )
+
+            # ============================================================
+            # 3️⃣ INSERT 실행
+            # ============================================================
+            if insert_payloads:
+                cursor.executemany(insert_sql, insert_payloads)
+                logger.info("Inserted %d new contests", len(insert_payloads))
+
+            # ============================================================
+            # 4️⃣ UPDATE 실행
+            # ============================================================
+            if update_payloads:
+                cursor.executemany(update_sql, update_payloads)
+                logger.info("Updated %d existing contests", len(update_payloads))
+
+            connection.commit()
 
 
 def main():
