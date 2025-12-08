@@ -6,11 +6,13 @@ from datetime import datetime, date
 from typing import List, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
-from playwright_stealth import stealth_async
+from playwright_stealth import StealthPlugin
+from stealth_sync import stealth_sync
 
 import pymysql
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+import asyncio
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,6 +23,12 @@ logger = logging.getLogger("LinkareerCrawler")
 load_dotenv()
 
 DEFAULT_WAIT = 8000  # ms
+
+
+async def apply_stealth(page, stealth):
+    """stealth_sync(page, stealth)를 async Playwright에서 실행하도록 래핑"""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: stealth_sync(page, stealth))
 
 
 class LinkareerCrawler:
@@ -59,7 +67,11 @@ class LinkareerCrawler:
 
         self.page = await self.context.new_page()
 
-        await stealth_async(self.page)
+        # -----------------------------
+        # NEW stealth 적용
+        # -----------------------------
+        stealth = StealthPlugin()
+        await apply_stealth(self.page, stealth)
 
     async def stop(self):
         """Playwright Browser 종료"""
