@@ -57,13 +57,17 @@ class LinkareerCrawler:
         logger.info(f"Opening list page: {url}")
 
         try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except PlaywrightTimeout:
             logger.warning(f"Timeout while opening list page: {url}")
             return []
 
-        # 리스트가 로딩될 때까지 대기
-        await self.page.wait_for_selector("div.list-body", timeout=DEFAULT_WAIT)
+        # div.list-body 대기 (대기시간 충분히)
+        try:
+            await self.page.wait_for_selector("div.list-body", timeout=20000)
+        except PlaywrightTimeout:
+            logger.error("list-body not found — page load failed")
+            return []
 
         anchors = await self.page.locator("div.list-body a[href^='/activity/']").all()
 
@@ -72,17 +76,14 @@ class LinkareerCrawler:
 
         for a in anchors:
             try:
-                href = await a.get_attribute("href", timeout=2000)
-            except Exception:
-                continue  # attribute 못 가져오면 skip
-
-            if not href:
+                href = await a.get_attribute("href")
+            except PlaywrightTimeout:
                 continue
-
-            full = urljoin(self.BASE_URL, href)
-            if full not in seen:
-                seen.add(full)
-                urls.append(full)
+            if href:
+                full = urljoin(self.BASE_URL, href)
+                if full not in seen:
+                    seen.add(full)
+                    urls.append(full)
 
         logger.info(f"Found {len(urls)} activity URLs on page {page_number}")
         return urls
@@ -155,27 +156,30 @@ class LinkareerCrawler:
         return result
 
     async def _reset_context(self):
-        """context/page 리셋 (브라우저는 유지)"""
         if self.context:
-            await self.context.close()
+            try:
+                await self.context.close()
+            except:
+                pass
 
         self.context = await self.browser.new_context(
-            viewport={"width": 1200, "height": 900},
+            viewport={"width": 1200, "height": 900}
         )
         self.page = await self.context.new_page()
 
     async def crawl_pages(self, max_pages=100, limit_per_page=None):
-        await self.start()  # ← browser만 켬
+        await self.start()  # 브라우저만 실행
 
         all_data = []
 
         for page_number in range(1, max_pages + 1):
 
-            # 🔥 페이지 시작할 때 context/page 새로 만들기
+            # 🔥 페이지 시작할 때 context/page 새로 생성
             await self._reset_context()
 
             urls = await self.fetch_list_page(page_number)
             if not urls:
+                logger.warning(f"No URLs found on page {page_number}. Stopping.")
                 break
 
             if limit_per_page:
@@ -185,6 +189,8 @@ class LinkareerCrawler:
                 data = await self.fetch_activity_details(url)
                 if data:
                     all_data.append(data)
+
+                await self.page.wait_for_timeout(self.throttle * 1000)
 
             logger.info(f"Finished page {page_number}")
 
