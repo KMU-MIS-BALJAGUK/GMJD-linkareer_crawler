@@ -53,16 +53,17 @@ class LinkareerCrawler:
             logger.info("Browser closed.")
 
     async def fetch_list_page(self, page_number: int) -> List[str]:
-        """1) 목록 페이지에서 활동 URL 추출"""
         url = self.LIST_URL.format(page=page_number)
         logger.info(f"Opening list page: {url}")
 
         try:
-            await self.page.goto(url, wait_until="networkidle", timeout=20000)
+            # networkidle -> domcontentloaded 로 변경
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except PlaywrightTimeout:
             logger.warning(f"Timeout while opening list page: {url}")
             return []
 
+        # 실제 렌더링 요소를 기다림
         await self.page.wait_for_selector("div.list-body", timeout=DEFAULT_WAIT)
 
         anchors = await self.page.locator("div.list-body a[href^='/activity/']").all()
@@ -88,14 +89,14 @@ class LinkareerCrawler:
         logger.info(f"Visiting detail page: {url}")
 
         try:
-            await self.page.goto(url, wait_until="networkidle", timeout=20000)
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except PlaywrightTimeout:
             logger.error(f"Timeout loading detail page: {url}")
             return None
 
         try:
             await self.page.wait_for_selector(
-                "header[class^='ActivityInformationHeader__']", timeout=DEFAULT_WAIT
+                "header[class^='ActivityInformationHeader__']"
             )
         except PlaywrightTimeout:
             logger.warning(f"No title header found — skipping: {url}")
