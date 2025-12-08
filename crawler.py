@@ -538,7 +538,6 @@ class LinkareerCrawler:
                     time.sleep(1)
 
                 # 상세 페이지 스크랩
-                logger.info("Visiting detail page: %s", url)
                 details = self.fetch_activity_details(url)
                 detail_count += 1
 
