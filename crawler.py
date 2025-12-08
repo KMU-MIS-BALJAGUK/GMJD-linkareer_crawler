@@ -271,9 +271,11 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
             existing = {(r[1], r[2]): r[0] for r in cursor.fetchall()}
 
             insert_sql = """
-                INSERT INTO contests categories, end_date, image_url, name, organization_name,
-                site_url, start_date, award_scale, benefits, additional_benefits,
-                target_participants, company_type, views
+                INSERT INTO contests (
+                    categories, end_date, image_url, name, organization_name,
+                    site_url, start_date, award_scale, benefits, additional_benefits,
+                    target_participants, company_type, views
+                )
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """
 
