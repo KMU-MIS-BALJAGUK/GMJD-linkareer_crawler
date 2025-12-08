@@ -6,7 +6,7 @@ from datetime import datetime, date
 from typing import List, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
-from playwright_stealth import StealthPlugin
+from playwright_stealth import stealth_async
 from stealth_sync import stealth_sync
 
 import pymysql
@@ -70,8 +70,7 @@ class LinkareerCrawler:
         # -----------------------------
         # NEW stealth 적용
         # -----------------------------
-        stealth = StealthPlugin()
-        await apply_stealth(self.page, stealth)
+        await stealth_async(self.page)
 
     async def stop(self):
         """Playwright Browser 종료"""
