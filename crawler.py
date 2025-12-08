@@ -6,6 +6,8 @@ from datetime import datetime, date
 from typing import List, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
+from playwright_stealth import stealth
+
 import pymysql
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -34,16 +36,27 @@ class LinkareerCrawler:
         self.throttle = throttle
 
     async def start(self, headless=True):
-        """Playwright Browser 시작"""
         playwright = await async_playwright().start()
         self.browser = await playwright.chromium.launch(
             headless=headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
         )
+
         self.context = await self.browser.new_context(
-            viewport={"width": 1200, "height": 900},
+            viewport={"width": 1600, "height": 900},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/121.0.0.0 Safari/537.36",
+            locale="ko-KR",
+            timezone_id="Asia/Seoul",
         )
+
         self.page = await self.context.new_page()
+        await stealth(self.page)
 
     async def stop(self):
         """Playwright Browser 종료"""
