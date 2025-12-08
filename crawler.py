@@ -476,60 +476,75 @@ class LinkareerCrawler:
     def crawl_pages_by_click(
         self, max_pages: int = 100, per_page_limit: Optional[int] = None
     ):
-        self.start()
-
-        first_url = f"{self.Newest_Url}1"
-        logger.info(f"Opening initial list page: {first_url}")
-        self.driver.get(first_url)
-
-        WebDriverWait(self.driver, self.wait_time).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
-        )
-        time.sleep(1)
-
         collected = []
-        detail_count = 0  # 🔥 상세 페이지 방문 카운터
+        detail_count = 0
 
-        for _ in range(max_pages):
+        for page in range(1, max_pages + 1):
 
+            # =========================
+            # 1) 매 페이지마다 WebDriver 새로 시작
+            # =========================
+            logger.info(f"Starting driver for page {page}")
+            self.start()
+
+            page_url = f"{self.Newest_Url}{page}"
+            logger.info(f"Opening page URL: {page_url}")
+            self.driver.get(page_url)
+
+            try:
+                WebDriverWait(self.driver, self.wait_time).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
+                )
+            except TimeoutException:
+                logger.warning(f"Page {page} did not load. Stopping crawl.")
+                self.stop()
+                break
+
+            time.sleep(1)
+
+            # =========================
+            # 2) URL 리스트 가져오기
+            # =========================
             urls = self.fetch_activity_urls()
             if not urls:
+                logger.info(f"No URLs found on page {page}. Terminating.")
+                self.stop()
                 break
 
-            prev_first = urls[0]
             limit = per_page_limit or len(urls)
 
-            for url in urls[:limit]:
+        for idx, url in enumerate(urls[:limit]):
 
-                # 🔥 Chrome 안정성 유지: 20개마다 driver 재시작
-                if detail_count > 0 and detail_count % 20 == 0:
-                    logger.info("Restarting driver to prevent memory leak...")
-                    self.stop()
-                    self.start()
+            # 상세 페이지 10개마다 Chrome 재시작
+            if detail_count > 0 and detail_count % 10 == 0:
+                logger.info("Restarting Chrome (detail_count reached %d)", detail_count)
+                self.stop()
+                self.start()
 
-                    # 리스트 페이지 다시 열기 + 스크롤 위치 유지
-                    self.driver.get(first_url)
-                    time.sleep(1)
+                # 현재 페이지를 다시 열어 목록을 유지
+                logger.info("Reopening page after restart: %s", page_url)
+                self.driver.get(page_url)
+                time.sleep(1)
 
-                details = self.fetch_activity_details(url)
-                detail_count += 1
+            # ============================
+            details = self.fetch_activity_details(url)
+            detail_count += 1
 
-                if details:
-                    collected.append(details)
+            if details:
+                collected.append(details)
 
-            # 다음 페이지 이동
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_all_elements_located(
-                    (By.CSS_SELECTOR, "button.button-page-number")
-                )
-            )
+            # 현재 페이지 작업 완료 → 드라이버 종료
+            self.stop()
 
-            if not self.go_to_next_page():
+            logger.info(f"Finished page {page}. Moving to next page...")
+
+            # =========================
+            # 4) 더 이상 페이지가 없으면 종료
+            # =========================
+            # 링크어커 페이지 끝에서 빈 페이지가 뜨면 종료
+            if len(urls) == 0:
                 break
 
-            self.wait_for_list_update(prev_first)
-
-        self.stop()
         return collected
 
 
