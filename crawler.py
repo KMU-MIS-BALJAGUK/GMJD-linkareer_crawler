@@ -328,6 +328,9 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
                         )
                     )
 
+            # 종료된 공모전 삭제
+            cursor.execute("DELETE FROM contests WHERE end_date < CURDATE()")
+
             if inserts:
                 cursor.executemany(insert_sql, inserts)
             if updates:
