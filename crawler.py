@@ -69,6 +69,9 @@ class LinkareerCrawler:
     def _make_driver(self):
         opts = Options()
 
+        # Chrome 실행 파일 경로 지정 (EC2)
+        opts.binary_location = "/opt/google/chrome/google-chrome"
+
         # headless 모드
         opts.add_argument("--headless=new")
 
