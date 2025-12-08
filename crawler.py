@@ -228,6 +228,21 @@ def _parse_date(date_str: Optional[str]):
         return None
 
 
+def _parse_mysql_url(url: str) -> tuple[str, int, str]:
+    """jdbc:mysql://host:port/db 형태를 host, port, db 로 파싱"""
+    if url.startswith("jdbc:"):
+        url = url[len("jdbc:") :]
+    parsed = urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or 3306
+    database = parsed.path.lstrip("/") if parsed.path else None
+    if not host or not database:
+        raise RuntimeError(
+            "RDS_URL must include host and database, e.g. mysql://host:3306/dbname"
+        )
+    return host, port, database
+
+
 # -----------------------------------------------------------
 # 4) DB 저장
 # -----------------------------------------------------------
