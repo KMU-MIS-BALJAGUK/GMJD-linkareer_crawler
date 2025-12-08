@@ -179,45 +179,19 @@ class LinkareerCrawler:
         return urls
 
     def fetch_activity_details(self, detail_url: str) -> Optional[Dict]:
-        """
-        상세 정보 추출
-        activity 상세 페이지를 방문하여 세부 정보를 추출
-
-        Args:
-            detail_url (str): 정보를 추출할 상세 페이지의 절대 URL.
-
-        Returns:
-            Optional[Dict]: 추출된 정보가 담긴 딕셔너리. 실패 시 None을 반환.
-        """
-        self.start()
         driver = self.driver
         logger.info("Visiting detail page: %s", detail_url)
 
-        original_handle = driver.current_window_handle
-
         try:
-            # 🔥 새 탭 열기 시도
-            driver.execute_script(f"window.open('{detail_url}', '_blank');")
-
-            # 가장 마지막 탭(방금 연 탭)으로 이동
-            driver.switch_to.window(driver.window_handles[-1])
+            # 🔥 새 탭 대신 같은 탭에서 직접 이동
+            driver.get(detail_url)
 
             wait = WebDriverWait(driver, self.wait_time)
-            try:
-                wait.until(
-                    EC.presence_of_element_located(
-                        (
-                            By.CSS_SELECTOR,
-                            "header[class^='ActivityInformationHeader__']",
-                        )
-                    )
+            wait.until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "header[class^='ActivityInformationHeader__']")
                 )
-            except TimeoutException:
-                logger.warning(
-                    "Timeout waiting for detail page to render: %s", detail_url
-                )
-                # 이 상세 페이지는 스킵
-                return None
+            )
 
             time.sleep(self.throttle)
 
@@ -387,20 +361,6 @@ class LinkareerCrawler:
         except WebDriverException as e:
             logger.error("WebDriverException on detail %s: %s", detail_url, e)
             return None
-
-        finally:
-            # 🔥 리스트 탭만 남기도록 나머지 탭 정리
-            try:
-                handles = driver.window_handles
-                for h in handles:
-                    if h != original_handle:
-                        driver.switch_to.window(h)
-                        driver.close()
-                # 다시 리스트 탭으로 복귀
-                driver.switch_to.window(original_handle)
-            except Exception:
-                # 탭 정리 중 에러는 무시 (다음 루프에서 다시 정상화)
-                pass
 
     def _extract_organization_name(self, driver) -> Optional[str]:
         """상세 페이지 내 주최/주관 정보를 추출"""
