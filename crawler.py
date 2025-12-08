@@ -104,13 +104,17 @@ class LinkareerCrawler:
 
         def safe(selector: str):
             try:
-                return self.page.locator(selector).inner_text(timeout=2000)
+                return self.page.locator(selector, strict=False).inner_text(
+                    timeout=2000
+                )
             except:
                 return None
 
         def safe_attr(selector: str, attr: str):
             try:
-                return self.page.locator(selector).get_attribute(attr, timeout=2000)
+                return self.page.locator(selector, strict=False).get_attribute(
+                    attr, timeout=2000
+                )
             except:
                 return None
 
