@@ -1,556 +1,178 @@
-from __future__ import annotations
 import json
 import logging
 import os
 import time
-from datetime import date, datetime
-from typing import Dict, List, Optional
+from datetime import datetime, date
+from typing import List, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
 import pymysql
 from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.common.exceptions import (
-    NoSuchElementException,
-    TimeoutException,
-    WebDriverException,
-)
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
-
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
-# "LinkareerCrawler" 로거 생성
 logger = logging.getLogger("LinkareerCrawler")
 
 load_dotenv()
 
-DEFAULT_WAIT = 12
+DEFAULT_WAIT = 8000  # ms
 
 
 class LinkareerCrawler:
-    """
-    링커리어(https://linkareer.com) 크롤링 클래스.
-    """
-
-    # 최신순으로 정렬된 공모전 목록 페이지 URL의 기본 형태
-    Newest_Url = "https://linkareer.com/list/contest?filterType=CATEGORY&orderBy_direction=DESC&orderBy_field=CREATED_AT&page="
-
     BASE_URL = "https://linkareer.com"
+    LIST_URL = (
+        "https://linkareer.com/list/contest"
+        "?filterType=CATEGORY&orderBy_direction=DESC&orderBy_field=CREATED_AT&page={page}"
+    )
 
-    LIST_PATH = "/list/contest"
-
-    def __init__(
-        self,
-        headless: bool = True,
-        wait_time: int = DEFAULT_WAIT,
-        viewport: tuple = (1200, 900),
-        throttle: float = 1.0,
-    ):
-        """
-        Args:
-            headless (bool): True일 경우 브라우저 창을 띄우지 않고 백그라운드에서 실행
-            wait_time (int): 웹 요소가 나타날 때까지 기다리는 최대 시간(초)
-            viewport (tuple): 브라우저 창 크기를 (너비, 높이) 튜플로 설정
-            throttle (float): 각 HTTP 요청 사이에 추가하는 대기 시간(초)
-        """
-        self.headless = headless
-        self.wait_time = wait_time
-        self.viewport = viewport
+    def __init__(self, throttle: float = 0.3):
+        self.browser = None
+        self.context = None
         self.throttle = throttle
-        self.driver = None
 
-    def _make_driver(self):
-        opts = Options()
+    async def start(self, headless=True):
+        """Playwright Browser 시작"""
+        playwright = await async_playwright().start()
+        self.browser = await playwright.chromium.launch(
+            headless=headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        self.context = await self.browser.new_context(
+            viewport={"width": 1200, "height": 900},
+        )
+        self.page = await self.context.new_page()
 
-        opts.binary_location = "/opt/google/chrome/google-chrome"
+    async def stop(self):
+        """Playwright Browser 종료"""
+        if self.browser:
+            await self.browser.close()
+            self.browser = None
+            logger.info("Browser closed.")
 
-        # headless + 메모리누수 방지 옵션
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--disable-software-rasterizer")
-        opts.add_argument("--disable-background-timer-throttling")
-        opts.add_argument("--disable-backgrounding-occluded-windows")
-        opts.add_argument("--disable-renderer-backgrounding")
-        opts.add_argument("--disable-features=CalculateNativeWinOcclusion")
-        opts.add_argument("--window-size=1200,900")
+    async def fetch_list_page(self, page_number: int) -> List[str]:
+        """1) 목록 페이지에서 활동 URL 추출"""
+        url = self.LIST_URL.format(page=page_number)
+        logger.info(f"Opening list page: {url}")
 
-        # HTML만 로딩하고 JS 렌더링은 기다리지 않음
-        opts.page_load_strategy = "none"
-
-        # 이미지 로딩 중지
-        prefs = {"profile.managed_default_content_settings.images": 2}
-        opts.add_experimental_option("prefs", prefs)
-
-        chrome_driver_path = ChromeDriverManager(
-            driver_version="143.0.7499.40"
-        ).install()
-
-        service = Service(chrome_driver_path)
-        driver = webdriver.Chrome(service=service, options=opts)
-
-        # 타임아웃 설정
-        driver.set_page_load_timeout(15)
-        driver.set_script_timeout(15)
-
-        return driver
-
-    def start(self):
-        """웹 드라이버 시작"""
-        if self.driver is None:
-            logger.info("Starting WebDriver")
-            self.driver = self._make_driver()
-
-    def stop(self):
-        """웹 드라이버를 안전하게 종료하고 리소스를 해제"""
-        if self.driver:
-            try:
-                self.driver.quit()
-            except Exception:
-                pass
-            self.driver = None
-            logger.info("WebDriver stopped.")
-
-    def fetch_activity_urls(self) -> List[str]:
-        """
-        URL 이동 없이, 현재 페이지의 리스트 영역에서만 activity URL들을 추출.
-        (React 렌더링 안정화 포함)
-        """
-        self.start()
-        driver = self.driver
-
-        wait = WebDriverWait(driver, self.wait_time)
-
-        # 1) list-body 로딩 대기
         try:
-            wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
-            )
-        except TimeoutException:
-            logger.warning("Timeout waiting for list-body on current page")
+            await self.page.goto(url, wait_until="networkidle", timeout=20000)
+        except PlaywrightTimeout:
+            logger.warning(f"Timeout while opening list page: {url}")
             return []
 
-        # 2) React 렌더링 안정화 (anchor 개수 변화 감지)
-        prev_count = -1
-        stable_count = 0
-        for _ in range(20):
-            anchors = driver.find_elements(
-                By.CSS_SELECTOR, "div.list-body a[href^='/activity/']"
-            )
-            curr_count = len(anchors)
+        await self.page.wait_for_selector("div.list-body", timeout=DEFAULT_WAIT)
 
-            if curr_count == prev_count:
-                stable_count += 1
-            else:
-                stable_count = 0
+        anchors = await self.page.locator("div.list-body a[href^='/activity/']").all()
 
-            if stable_count >= 3:  # 3번 연속 동일 → 렌더링 완료
-                break
-
-            prev_count = curr_count
-            time.sleep(0.2)
-
-        # 3) anchors 파싱
-        anchors = driver.find_elements(
-            By.CSS_SELECTOR, "div.list-body a[href^='/activity/']"
-        )
-
-        logger.info("Found %d anchors on current page", len(anchors))
-
-        seen = set()
         urls = []
+        seen = set()
 
-        for el in anchors:
-            try:
-                href = el.get_attribute("href")
-                if not href:
-                    continue
-
-                full_url = urljoin(self.BASE_URL, href)
-                if full_url not in seen:
-                    seen.add(full_url)
-                    urls.append(full_url)
-            except Exception:
+        for a in anchors:
+            href = await a.get_attribute("href")
+            if not href:
                 continue
+            full = urljoin(self.BASE_URL, href)
+            if full not in seen:
+                seen.add(full)
+                urls.append(full)
 
-        logger.info("Found %d unique activity URLs on current page", len(urls))
+        logger.info(f"Found {len(urls)} activity URLs on page {page_number}")
         return urls
 
-    def fetch_activity_details(self, detail_url: str) -> Optional[Dict]:
-        driver = self.driver
-        logger.info("Visiting detail page: %s", detail_url)
+    async def fetch_activity_details(self, url: str) -> Optional[Dict]:
+        """2) 상세 페이지 스크랩"""
+
+        logger.info(f"Visiting detail page: {url}")
 
         try:
-            driver.get(detail_url)
+            await self.page.goto(url, wait_until="networkidle", timeout=20000)
+        except PlaywrightTimeout:
+            logger.error(f"Timeout loading detail page: {url}")
+            return None
 
-            # JS 렌더링까지 기다릴 필요 없음 — 가장 중요한 요소만 대기
-            wait = WebDriverWait(driver, 10)
-            wait.until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "header[class^='ActivityInformationHeader__']")
-                )
+        try:
+            await self.page.wait_for_selector(
+                "header[class^='ActivityInformationHeader__']", timeout=DEFAULT_WAIT
             )
-
-            time.sleep(self.throttle)
-
-            # 결과를 저장할 딕셔너리를 기본값으로 초기화
-            result = {
-                "activity_title": None,
-                "activity_url": None,
-                "activity_category": [],
-                "start_date": None,
-                "end_date": None,
-                "activity_img": None,
-                "organization_name": None,
-                "detail_url": detail_url,
-                # --- 추가해야 하는 필드들 ---
-                "award_scale": None,
-                "benefits": None,
-                "additional_benefits": None,
-                "target_participants": None,
-                "company_type": None,
-                "views": None,
-            }
-
-            # --- 각 필드 스크래핑 시작 ---
-
-            # 제목 (activity_title): 헤더(<header>) 안의 <h1> 태그에서 텍스트 추출
-            try:
-                # ActivityInformationHeader__로 시작하는 class의 h1
-                title_element = driver.find_element(
-                    By.CSS_SELECTOR, "header[class^='ActivityInformationHeader__'] h1"
-                )
-                result["activity_title"] = title_element.text.strip()
-            except NoSuchElementException:
-                logger.debug("Title not found on %s", detail_url)
-
-            # 홈페이지 URL (activity_url): 'HomepageField' 클래스로 시작하는 <dl> 내부의 <a> 태그에서 href 속성 추출
-            try:
-                home_anchor = driver.find_element(
-                    By.CSS_SELECTOR, "dl[class^='HomepageField__'] a"
-                )
-                result["activity_url"] = home_anchor.get_attribute("href")
-            except NoSuchElementException:
-                logger.debug("Homepage/activity_url not found on %s", detail_url)
-
-            # 카테고리 (activity_category): 카테고리 칩 목록 내부의 모든 <p> 태그 텍스트를 가져와 '/' 기준으로 분리하고, 하나의 리스트로 만듭니다.
-            try:
-                category_elements = driver.find_elements(
-                    By.CSS_SELECTOR, "ul[class^='CategoryChipList__'] p"
-                )
-
-                categories = []
-                for p_element in category_elements:
-                    text = p_element.text.strip()
-                    if text:
-                        categories.append(text)  # split 하지 않음!
-
-                result["activity_category"] = categories
-
-            except NoSuchElementException:
-                logger.debug("Category not found on %s", detail_url)
-
-            # 접수 시작일 (start_date): 'start-at' 클래스를 가진 <span> 태그의 텍스트를 추출
-            try:
-                result["start_date"] = driver.find_element(
-                    By.CSS_SELECTOR, ".start-at + span"
-                ).text.strip()
-            except NoSuchElementException:
-                logger.debug("Start date not found on %s", detail_url)
-
-            # 접수 마감일 (end_date): 'end-at' 클래스를 가진 <span> 태그의 텍스트를 추출
-            try:
-                result["end_date"] = driver.find_element(
-                    By.CSS_SELECTOR, ".end-at + span"
-                ).text.strip()
-            except NoSuchElementException:
-                logger.debug("End date not found on %s", detail_url)
-
-            # 대표 이미지 (activity_img): 'card-image' 클래스 <img> 태그의 src 속성을 추출
-            try:
-                result["activity_img"] = driver.find_element(
-                    By.CSS_SELECTOR, "img.card-image"
-                ).get_attribute("src")
-            except NoSuchElementException:
-                logger.debug("img.card-image not found, trying fallback selector.")
-                try:
-                    poster_img = driver.find_element(
-                        By.CSS_SELECTOR, "div.poster > img"
-                    )
-                    result["activity_img"] = poster_img.get_attribute("src")
-                except NoSuchElementException:
-                    logger.debug("Activity image not found on %s", detail_url)
-
-            # --- 추가 항목들 수집 (CSS_SELECTOR는 직접 넣어야 함) ---
-
-            try:
-                # 예: 상금 규모
-                result["award_scale"] = driver.find_element(
-                    By.CSS_SELECTOR,
-                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(3) > dd",
-                ).text.strip()
-            except NoSuchElementException:
-                pass
-
-            try:
-                # 예: 혜택
-                result["benefits"] = driver.find_element(
-                    By.CSS_SELECTOR,
-                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(6) > dd",
-                ).text.strip()
-            except NoSuchElementException:
-                pass
-
-            try:
-                # 예: 추가 혜택
-                result["additional_benefits"] = driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(8) > dd",
-                )
-                # 배열 형태일 수 있으므로 join 처리
-                result["additional_benefits"] = ", ".join(
-                    [el.text.strip() for el in result["additional_benefits"]]
-                )
-            except NoSuchElementException:
-                pass
-
-            try:
-                # 예: 참가 대상
-                result["target_participants"] = driver.find_element(
-                    By.CSS_SELECTOR,
-                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(2) > dd",
-                ).text.strip()
-            except NoSuchElementException:
-                pass
-
-            try:
-                # 예: 회사 유형
-                result["company_type"] = driver.find_element(
-                    By.CSS_SELECTOR,
-                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > div.ActivityInfomationField__StyledWrapper-sc-2edfa11d-0.bKwmrS > dl:nth-child(1) > dd",
-                ).text.strip()
-            except NoSuchElementException:
-                pass
-
-            try:
-                # 조회수
-                result["views"] = driver.find_element(
-                    By.CSS_SELECTOR,
-                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > header > div > span:nth-child(2)",
-                ).text.strip()
-            except NoSuchElementException:
-                pass
-
-            # 주최/주관 (organization_name): 다양한 라벨을 대상으로 텍스트를 추출
-            try:
-                result["organization_name"] = driver.find_element(
-                    By.CSS_SELECTOR,
-                    "#__next > div.id-__StyledWrapper-sc-826dfe1d-0.hLmKRJ > div > main > div > div > section:nth-child(1) > div > article > header > h2",
-                ).text.strip()
-            except NoSuchElementException:
-                pass
-
-            return result
-
-        except TimeoutException:
-            logger.warning("Timeout — restarting Chrome driver.")
-            self.stop()
-            self.start()
+        except PlaywrightTimeout:
+            logger.warning(f"No title header found — skipping: {url}")
             return None
 
-        except WebDriverException as e:
-            logger.error("Chrome crashed (%s). Restarting...", str(e)[:200])
-            self.stop()
-            self.start()
-            return None
-
-        finally:
-            # DOM 히스토리/메모리 비우기 (매우 중요!)
+        def safe(selector: str):
             try:
-                driver.get("about:blank")
+                return self.page.locator(selector).inner_text(timeout=2000)
             except:
-                pass
+                return None
 
-    def _extract_organization_name(self, driver) -> Optional[str]:
-        """상세 페이지 내 주최/주관 정보를 추출"""
-        label_candidates = ["주최", "주관", "주최/주관", "주최/주관/후원"]
-        xpaths = [
-            "//dt[contains(normalize-space(.), '{label}')]/following-sibling::dd[1]",
-            "//p[contains(normalize-space(.), '{label}')]/following-sibling::*[1]",
-            "//span[contains(normalize-space(.), '{label}')]/following-sibling::*[1]",
-        ]
-        for label in label_candidates:
-            for xpath in xpaths:
-                try:
-                    text = driver.find_element(
-                        By.XPATH, xpath.format(label=label)
-                    ).text.strip()
-                    if text:
-                        return text
-                except NoSuchElementException:
-                    continue
-        # 일부 상세 페이지에서는 별도의 컴포넌트 class 이름을 사용할 수 있으므로 여분의 시도
-        try:
-            # class 이름이 HostField__ 로 시작하는 dl에 주최 정보가 포함되는 경우 처리
-            dl = driver.find_element(By.CSS_SELECTOR, "dl[class^='HostField__'] dd")
-            text = dl.text.strip()
-            if text:
-                return text
-        except NoSuchElementException:
-            return None
-        return None
-
-    def get_current_page(self) -> int:
-        try:
-            current_btn = self.driver.find_element(
-                By.CSS_SELECTOR, "button.button-page-number.active-page span"
-            )
-            return int(current_btn.text.strip())
-        except Exception:
-            return 1
-
-    def click_page_number(self, page_number: int) -> bool:
-        try:
-            btn = self.driver.find_element(
-                By.XPATH,
-                f"//button[contains(@class,'button-page-number')]/span[text()='{page_number}']/..",
-            )
-            btn.click()
-            return True
-        except Exception:
-            return False
-
-    def click_next_arrow(self) -> bool:
-        try:
-            next_arrow = self.driver.find_element(
-                By.CSS_SELECTOR, "button.button-arrow-next:not(.Mui-disabled)"
-            )
-            next_arrow.click()
-            return True
-        except Exception:
-            return False
-
-    def go_to_next_page(self) -> bool:
-        driver = self.driver
-
-        current = self.get_current_page()
-        next_page_number = current + 1
-
-        # 1) 같은 블록 내 번호 버튼 존재?
-        if self.click_page_number(next_page_number):
-            return True
-
-        # 2) 없다 → 오른쪽 화살표 클릭하여 다음 블록으로 이동
-        if self.click_next_arrow():
-            # 화살표 클릭 후 페이지 번호가 바뀔 때까지 기다림
-            time.sleep(1)
-            return True
-
-        # 3) 더 이상 이동 불가 → 마지막 페이지
-        return False
-
-    def wait_for_list_update(self, prev_first_url: str):
-        for _ in range(20):
+        def safe_attr(selector: str, attr: str):
             try:
-                first_url = self.driver.find_element(
-                    By.CSS_SELECTOR, "div.list-body a[href^='/activity/']"
-                ).get_attribute("href")
-
-                if first_url != prev_first_url:
-                    return True
+                return self.page.locator(selector).get_attribute(attr, timeout=2000)
             except:
-                pass
+                return None
 
-            time.sleep(0.2)
+        # Playwright는 await 필요
+        result = {
+            "detail_url": url,
+            "activity_title": await safe(
+                "header[class^='ActivityInformationHeader__'] h1"
+            ),
+            "activity_url": await safe_attr("dl[class^='HomepageField__'] a", "href"),
+            "activity_category": [],
+            "start_date": await safe(".start-at + span"),
+            "end_date": await safe(".end-at + span"),
+            "activity_img": await safe_attr("img.card-image", "src"),
+            "organization_name": await safe("div > article > header > h2"),
+            # Optional Fields
+            "award_scale": await safe("dl:nth-of-type(3) dd"),
+            "benefits": await safe("dl:nth-of-type(6) dd"),
+            "target_participants": await safe("dl:nth-of-type(2) dd"),
+            "company_type": await safe("dl:nth-of-type(1) dd"),
+            "views": await safe("header span:nth-child(2)"),
+        }
 
-        return False
+        # categories
+        cat_elements = self.page.locator("ul[class^='CategoryChipList__'] p")
+        count = await cat_elements.count()
+        categories = []
+        for i in range(count):
+            txt = await cat_elements.nth(i).inner_text()
+            if txt:
+                categories.append(txt)
+        result["activity_category"] = categories
 
-    def crawl_pages_by_click(
-        self, max_pages: int = 100, per_page_limit: Optional[int] = None
-    ):
-        collected = []
+        return result
+
+    async def crawl_pages(self, max_pages=100, limit_per_page=None):
+        await self.start()
+
+        all_data = []
         detail_count = 0
 
         for page in range(1, max_pages + 1):
-
-            # --------------------------------------
-            # 1) 페이지마다 WebDriver 시작
-            # --------------------------------------
-            logger.info(f"Starting driver for page {page}")
-            self.start()
-
-            page_url = f"{self.Newest_Url}{page}"
-            logger.info(f"Opening page URL: {page_url}")
-            self.driver.get(page_url)
-
-            # 페이지 로딩 확인
-            try:
-                WebDriverWait(self.driver, self.wait_time).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
-                )
-            except TimeoutException:
-                logger.warning(f"Page {page} did not load. Stopping crawl.")
-                self.stop()
-                break
-
-            time.sleep(1)
-
-            # --------------------------------------
-            # 2) 현재 페이지에서 URL 리스트 가져오기
-            # --------------------------------------
-            urls = self.fetch_activity_urls()
+            urls = await self.fetch_list_page(page)
             if not urls:
-                logger.info(f"No URLs found on page {page}. Terminating.")
-                self.stop()
                 break
 
-            limit = per_page_limit or len(urls)
+            if limit_per_page:
+                urls = urls[:limit_per_page]
 
-            # --------------------------------------
-            # 3) 상세 페이지 크롤링 시작
-            # --------------------------------------
-            for url in urls[:limit]:
+            for url in urls:
+                data = await self.fetch_activity_details(url)
+                if data:
+                    all_data.append(data)
 
-                # 🔥 상세 페이지 10개마다 재시작
-                if detail_count > 0 and detail_count % 10 == 0:
-                    logger.info(
-                        "Restarting Chrome (detail_count reached %d)", detail_count
-                    )
-                    self.stop()
-                    self.start()
-
-                    # 페이지 다시 열어서 목록 유지
-                    logger.info("Reopening page after restart: %s", page_url)
-                    self.driver.get(page_url)
-                    WebDriverWait(self.driver, self.wait_time).until(
-                        EC.presence_of_element_located(
-                            (By.CSS_SELECTOR, "div.list-body")
-                        )
-                    )
-                    time.sleep(1)
-
-                # 상세 페이지 스크랩
-                details = self.fetch_activity_details(url)
                 detail_count += 1
 
-                if details:
-                    collected.append(details)
+                # throttle
+                await self.page.wait_for_timeout(self.throttle * 1000)
 
-            # --------------------------------------
-            # 4) 현재 페이지 작업 완료 → 드라이버 종료
-            # --------------------------------------
-            self.stop()
-            logger.info(f"Finished page {page}. Moving to next page...")
+            logger.info(f"Finished page {page}")
 
-        return collected
+        await self.stop()
+        return all_data
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[date]:
@@ -706,27 +328,26 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
             connection.commit()
 
 
+import asyncio
+
+
 def main():
     max_pages = int(os.getenv("LINKAREER_PAGE_LIMIT", "100"))
     per_page_limit_env = os.getenv("LINKAREER_PER_PAGE_LIMIT")
     per_page_limit = int(per_page_limit_env) if per_page_limit_env else None
-    headless = os.getenv("LINKAREER_HEADLESS", "true").lower() != "false"
 
-    crawler = LinkareerCrawler(headless=headless)
+    crawler = LinkareerCrawler()
 
-    # 페이지번호 클릭 기반 크롤링
-    records = crawler.crawl_pages_by_click(
-        max_pages=max_pages, per_page_limit=per_page_limit
+    records = asyncio.run(
+        crawler.crawl_pages(max_pages=max_pages, limit_per_page=per_page_limit)
     )
 
-    logger.info("Collected %d contest detail records", len(records))
+    logging.info(f"Collected {len(records)} contest items")
 
-    # 디버그용 (DB 쓰기 스킵)
     if os.getenv("SKIP_DB_WRITE", "false").lower() == "true":
         print(json.dumps(records[:2], indent=4, ensure_ascii=False))
         return
 
-    # RDS 저장
     persist_contests_to_rds(records)
 
 
