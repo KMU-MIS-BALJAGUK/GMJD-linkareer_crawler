@@ -1,13 +1,9 @@
 import json
 import logging
 import os
-import time
 from datetime import datetime, date
 from typing import List, Dict, Optional
 from urllib.parse import urljoin, urlparse
-
-from playwright_stealth import stealth_async
-from stealth_sync import stealth_sync
 
 import pymysql
 from dotenv import load_dotenv
@@ -25,12 +21,6 @@ load_dotenv()
 DEFAULT_WAIT = 8000  # ms
 
 
-async def apply_stealth(page, stealth):
-    """stealth_sync(page, stealth)를 async Playwright에서 실행하도록 래핑"""
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: stealth_sync(page, stealth))
-
-
 class LinkareerCrawler:
     BASE_URL = "https://linkareer.com"
     LIST_URL = (
@@ -45,6 +35,7 @@ class LinkareerCrawler:
 
     async def start(self, headless=True):
         playwright = await async_playwright().start()
+
         self.browser = await playwright.chromium.launch(
             headless=headless,
             args=[
@@ -54,6 +45,7 @@ class LinkareerCrawler:
             ],
         )
 
+        # Anti-Bot 효과 극대화
         self.context = await self.browser.new_context(
             viewport={"width": 1600, "height": 900},
             user_agent=(
@@ -63,14 +55,28 @@ class LinkareerCrawler:
             ),
             locale="ko-KR",
             timezone_id="Asia/Seoul",
+            java_script_enabled=True,
         )
 
         self.page = await self.context.new_page()
 
-        # -----------------------------
-        # NEW stealth 적용
-        # -----------------------------
-        await stealth_async(self.page)
+        # -----------------------
+        # Stealth 없이 Anti-Bot 우회
+        # -----------------------
+        await self.page.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+            window.navigator.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1,2,3],
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['ko-KR', 'ko'],
+            });
+        """
+        )
 
     async def stop(self):
         """Playwright Browser 종료"""
