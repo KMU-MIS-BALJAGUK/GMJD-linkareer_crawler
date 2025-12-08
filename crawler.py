@@ -481,9 +481,9 @@ class LinkareerCrawler:
 
         for page in range(1, max_pages + 1):
 
-            # =========================
-            # 1) 매 페이지마다 WebDriver 새로 시작
-            # =========================
+            # --------------------------------------
+            # 1) 페이지마다 WebDriver 시작
+            # --------------------------------------
             logger.info(f"Starting driver for page {page}")
             self.start()
 
@@ -491,6 +491,7 @@ class LinkareerCrawler:
             logger.info(f"Opening page URL: {page_url}")
             self.driver.get(page_url)
 
+            # 페이지 로딩 확인
             try:
                 WebDriverWait(self.driver, self.wait_time).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
@@ -502,9 +503,9 @@ class LinkareerCrawler:
 
             time.sleep(1)
 
-            # =========================
-            # 2) URL 리스트 가져오기
-            # =========================
+            # --------------------------------------
+            # 2) 현재 페이지에서 URL 리스트 가져오기
+            # --------------------------------------
             urls = self.fetch_activity_urls()
             if not urls:
                 logger.info(f"No URLs found on page {page}. Terminating.")
@@ -513,37 +514,42 @@ class LinkareerCrawler:
 
             limit = per_page_limit or len(urls)
 
-        for idx, url in enumerate(urls[:limit]):
+            # --------------------------------------
+            # 3) 상세 페이지 크롤링 시작
+            # --------------------------------------
+            for url in urls[:limit]:
 
-            # 상세 페이지 10개마다 Chrome 재시작
-            if detail_count > 0 and detail_count % 10 == 0:
-                logger.info("Restarting Chrome (detail_count reached %d)", detail_count)
-                self.stop()
-                self.start()
+                # 🔥 상세 페이지 10개마다 재시작
+                if detail_count > 0 and detail_count % 10 == 0:
+                    logger.info(
+                        "Restarting Chrome (detail_count reached %d)", detail_count
+                    )
+                    self.stop()
+                    self.start()
 
-                # 현재 페이지를 다시 열어 목록을 유지
-                logger.info("Reopening page after restart: %s", page_url)
-                self.driver.get(page_url)
-                time.sleep(1)
+                    # 페이지 다시 열어서 목록 유지
+                    logger.info("Reopening page after restart: %s", page_url)
+                    self.driver.get(page_url)
+                    WebDriverWait(self.driver, self.wait_time).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "div.list-body")
+                        )
+                    )
+                    time.sleep(1)
 
-            # ============================
-            details = self.fetch_activity_details(url)
-            detail_count += 1
+                # 상세 페이지 스크랩
+                logger.info("Visiting detail page: %s", url)
+                details = self.fetch_activity_details(url)
+                detail_count += 1
 
-            if details:
-                collected.append(details)
+                if details:
+                    collected.append(details)
 
-            # 현재 페이지 작업 완료 → 드라이버 종료
+            # --------------------------------------
+            # 4) 현재 페이지 작업 완료 → 드라이버 종료
+            # --------------------------------------
             self.stop()
-
             logger.info(f"Finished page {page}. Moving to next page...")
-
-            # =========================
-            # 4) 더 이상 페이지가 없으면 종료
-            # =========================
-            # 링크어커 페이지 끝에서 빈 페이지가 뜨면 종료
-            if len(urls) == 0:
-                break
 
         return collected
 
