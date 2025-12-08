@@ -78,6 +78,8 @@ class LinkareerCrawler:
         opts.add_argument("--disable-gpu")
         opts.add_argument("--disable-software-rasterizer")
         opts.add_argument("--remote-debugging-port=9222")
+
+        # opts.add_argument("--disable-infobars")
         opts.add_argument("--window-size=1200,900")
 
         # 이미지 로딩 비활성화
@@ -104,65 +106,69 @@ class LinkareerCrawler:
             self.driver = None
             logger.info("WebDriver stopped.")
 
-    def fetch_activity_urls(self, page: int = 1) -> List[str]:
+    def fetch_activity_urls(self) -> List[str]:
         """
-        URL 수집
-        특정 page 번호의 공모전 상세 페이지 URL 목록을 크롤링
-
-        Args:
-            page (int): 가져올 페이지 번호.
-
-        Returns:
-            List[str]: 해당 페이지에 있는 모든 공모전 상세 페이지의 절대 URL 리스트.
+        URL 이동 없이, 현재 페이지의 리스트 영역에서만 activity URL들을 추출.
+        (React 렌더링 안정화 포함)
         """
         self.start()
         driver = self.driver
-        list_url = f"{self.Newest_Url}{page}"
 
-        logger.info("Opening list page: %s", list_url)
-        driver.get(list_url)
-
-        # 동적으로 렌더링되는 목록의 첫 번째 항목이 나타날 때까지 대기
-        # 페이지가 비어있거나 로드에 실패 시 TimeoutException 발생
         wait = WebDriverWait(driver, self.wait_time)
+
+        # 1) list-body 로딩 대기
         try:
             wait.until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "div.list-body a[href^='/activity/']")
-                )
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
             )
         except TimeoutException:
-            logger.warning(
-                "Warning method(fetch_activity_urls) Timeout waiting for list page to render on page %d. No activities found or page is empty.",
-                page,
-            )
+            logger.warning("Timeout waiting for list-body on current page")
             return []
 
-        # list-body 내에서 '/activity/'로 시작하는 모든 링크(<a> 태그)
+        # 2) React 렌더링 안정화 (anchor 개수 변화 감지)
+        prev_count = -1
+        stable_count = 0
+        for _ in range(20):
+            anchors = driver.find_elements(
+                By.CSS_SELECTOR, "div.list-body a[href^='/activity/']"
+            )
+            curr_count = len(anchors)
+
+            if curr_count == prev_count:
+                stable_count += 1
+            else:
+                stable_count = 0
+
+            if stable_count >= 3:  # 3번 연속 동일 → 렌더링 완료
+                break
+
+            prev_count = curr_count
+            time.sleep(0.2)
+
+        # 3) anchors 파싱
         anchors = driver.find_elements(
             By.CSS_SELECTOR, "div.list-body a[href^='/activity/']"
         )
-        logger.info("Found %d anchors on page %d", len(anchors), page)
 
-        # 중복된 URL 수집을 방지하기 위해 set을 사용
-        seen_urls = set()
+        logger.info("Found %d anchors on current page", len(anchors))
+
+        seen = set()
         urls = []
+
         for el in anchors:
             try:
                 href = el.get_attribute("href")
                 if not href:
                     continue
 
-                # 상대 경로(e.g., '/activity/12345')를 절대 경로(e.g., 'https://...')로 변환
-                href = urljoin(self.BASE_URL, href)
-                if href not in seen_urls:
-                    seen_urls.add(href)
-                    urls.append(href)
-            except Exception as e:
-                logger.debug("Error parsing anchor element: %s", e)
+                full_url = urljoin(self.BASE_URL, href)
+                if full_url not in seen:
+                    seen.add(full_url)
+                    urls.append(full_url)
+            except Exception:
                 continue
 
-        logger.info("Found %d unique activity URLs on page %d", len(urls), page)
+        logger.info("Found %d unique activity URLs on current page", len(urls))
         return urls
 
     def fetch_activity_details(self, detail_url: str) -> Optional[Dict]:
@@ -180,11 +186,9 @@ class LinkareerCrawler:
         driver = self.driver
         logger.info("Visiting detail page: %s", detail_url)
 
-        try:
-            driver.get(detail_url)
-        except WebDriverException as e:
-            logger.error("WebDriverException visiting %s: %s", detail_url, e)
-            return None
+        # 🔥 새 탭 열기
+        driver.execute_script(f"window.open('{detail_url}', '_blank');")
+        driver.switch_to.window(driver.window_handles[-1])
 
         wait = WebDriverWait(driver, self.wait_time)
         try:
@@ -354,6 +358,12 @@ class LinkareerCrawler:
         except NoSuchElementException:
             pass
 
+        # 🔥 상세 페이지 탭 닫기
+        driver.close()
+
+        # 🔥 원래 목록 탭으로 돌아가기
+        driver.switch_to.window(driver.window_handles[0])
+
         return result
 
     def _extract_organization_name(self, driver) -> Optional[str]:
@@ -384,6 +394,138 @@ class LinkareerCrawler:
         except NoSuchElementException:
             return None
         return None
+
+    def get_current_page(self) -> int:
+        try:
+            current_btn = self.driver.find_element(
+                By.CSS_SELECTOR, "button.button-page-number.active-page span"
+            )
+            return int(current_btn.text.strip())
+        except Exception:
+            return 1
+
+    def click_page_number(self, page_number: int) -> bool:
+        try:
+            btn = self.driver.find_element(
+                By.XPATH,
+                f"//button[contains(@class,'button-page-number')]/span[text()='{page_number}']/..",
+            )
+            btn.click()
+            return True
+        except Exception:
+            return False
+
+    def click_next_arrow(self) -> bool:
+        try:
+            next_arrow = self.driver.find_element(
+                By.CSS_SELECTOR, "button.button-arrow-next:not(.Mui-disabled)"
+            )
+            next_arrow.click()
+            return True
+        except Exception:
+            return False
+
+    def go_to_next_page(self) -> bool:
+        driver = self.driver
+
+        current = self.get_current_page()
+        next_page_number = current + 1
+
+        # 1) 같은 블록 내 번호 버튼 존재?
+        if self.click_page_number(next_page_number):
+            return True
+
+        # 2) 없다 → 오른쪽 화살표 클릭하여 다음 블록으로 이동
+        if self.click_next_arrow():
+            # 화살표 클릭 후 페이지 번호가 바뀔 때까지 기다림
+            time.sleep(1)
+            return True
+
+        # 3) 더 이상 이동 불가 → 마지막 페이지
+        return False
+
+    def wait_for_list_update(self, prev_first_url: str):
+        for _ in range(20):
+            try:
+                first_url = self.driver.find_element(
+                    By.CSS_SELECTOR, "div.list-body a[href^='/activity/']"
+                ).get_attribute("href")
+
+                if first_url != prev_first_url:
+                    return True
+            except:
+                pass
+
+            time.sleep(0.2)
+
+        return False
+
+    def crawl_pages_by_click(
+        self, max_pages: int = 100, per_page_limit: Optional[int] = None
+    ):
+        """
+        페이지 버튼 클릭 기반 크롤링 (React 기반 페이지 전환 지원)
+        Args:
+            max_pages (int): 최대 몇 개의 페이지를 크롤링할지
+            per_page_limit (Optional[int]): 한 페이지에서 몇 개의 상세만 크롤링할지 (None이면 전체)
+        """
+        self.start()
+
+        # -----------------------------------------
+        # ✅ 최초 페이지 직접 접근 (중요!!)
+        # -----------------------------------------
+        first_url = f"{self.Newest_Url}1"
+        logger.info(f"Opening initial list page: {first_url}")
+        self.driver.get(first_url)
+
+        # React 렌더링 기다림
+        WebDriverWait(self.driver, self.wait_time).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-body"))
+        )
+        time.sleep(1)
+
+        collected = []
+
+        for _ in range(max_pages):
+
+            # -----------------------------
+            # 1) 현재 페이지의 리스트에서 URL 가져오기
+            # -----------------------------
+            urls = self.fetch_activity_urls()  # URL?page=N 방식 미사용
+            if not urls:
+                break
+
+            prev_first = urls[0]  # 다음 페이지 로딩 완료 여부 판단용
+
+            # -----------------------------
+            # 2) 상세 페이지 크롤링
+            # -----------------------------
+            limit = per_page_limit or len(urls)
+
+            for url in urls[:limit]:
+                details = self.fetch_activity_details(url)
+                if details:
+                    collected.append(details)
+
+            # -----------------------------
+            # 3) 다음 페이지 클릭 (없으면 종료)
+            # -----------------------------
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_all_elements_located(
+                    (By.CSS_SELECTOR, "button.button-page-number")
+                )
+            )
+
+            if not self.go_to_next_page():
+                break
+
+            # -----------------------------
+            # 4) 다음 페이지 로딩 안정화 대기
+            # -----------------------------
+            self.wait_for_list_update(prev_first)
+
+        self.stop()
+        return collected
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[date]:
@@ -497,41 +639,27 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
         logger.info("Persisted %d contest records to RDS", len(payloads))
 
 
-def crawl_pages(
-    pages: int, headless: bool = True, per_page_limit: Optional[int] = None
-) -> List[Dict]:
-    crawler = LinkareerCrawler(headless=headless)
-    collected: List[Dict] = []
-    try:
-        for page in range(1, pages + 1):
-            urls = crawler.fetch_activity_urls(page=page)
-            if not urls:
-                logger.info("No URLs found on page %d. Stopping crawl.", page)
-                break
-
-            for url in urls[: per_page_limit or len(urls)]:
-                details = crawler.fetch_activity_details(url)
-                if details:
-                    collected.append(details)
-            time.sleep(0.5)
-    finally:
-        crawler.stop()
-    return collected
-
-
 def main():
-    pages = int(os.getenv("LINKAREER_PAGE_LIMIT", "100"))
+    max_pages = int(os.getenv("LINKAREER_PAGE_LIMIT", "100"))
     per_page_limit_env = os.getenv("LINKAREER_PER_PAGE_LIMIT")
     per_page_limit = int(per_page_limit_env) if per_page_limit_env else None
     headless = os.getenv("LINKAREER_HEADLESS", "true").lower() != "false"
 
-    records = crawl_pages(pages=pages, headless=headless, per_page_limit=per_page_limit)
+    crawler = LinkareerCrawler(headless=headless)
+
+    # 페이지번호 클릭 기반 크롤링
+    records = crawler.crawl_pages_by_click(
+        max_pages=max_pages, per_page_limit=per_page_limit
+    )
+
     logger.info("Collected %d contest detail records", len(records))
 
+    # 디버그용 (DB 쓰기 스킵)
     if os.getenv("SKIP_DB_WRITE", "false").lower() == "true":
         print(json.dumps(records[:2], indent=4, ensure_ascii=False))
         return
 
+    # RDS 저장
     persist_contests_to_rds(records)
 
 
