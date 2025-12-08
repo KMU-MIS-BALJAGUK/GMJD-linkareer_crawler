@@ -309,7 +309,7 @@ def persist_contests_to_rds(records: List[Dict]) -> None:
                             img,
                             title,
                             org,
-                            rec.get("detail_url"),
+                            rec.get("activity_url") or "",
                             start,
                             rec.get("award_scale") or "",
                             rec.get("benefits") or "",
