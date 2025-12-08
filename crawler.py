@@ -69,7 +69,7 @@ class LinkareerCrawler:
     def _make_driver(self):
         opts = Options()
 
-        opts.binary_location = "/usr/bin/google-chrome"
+        opts.binary_location = "/opt/google/chrome/google-chrome"
 
         opts.add_argument("--headless=new")
         opts.add_argument("--no-sandbox")
