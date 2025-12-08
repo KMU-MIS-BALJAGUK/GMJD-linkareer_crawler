@@ -102,15 +102,15 @@ class LinkareerCrawler:
             logger.warning(f"No title header found — skipping: {url}")
             return None
 
-        def safe(selector: str):
+        async def safe(selector: str):
             try:
-                return self.page.locator(selector, strict=False).inner_text(
+                return await self.page.locator(selector, strict=False).inner_text(
                     timeout=2000
                 )
             except:
                 return None
 
-        def safe_attr(selector: str, attr: str):
+        async def safe_attr(selector: str, attr: str):
             try:
                 return self.page.locator(selector, strict=False).get_attribute(
                     attr, timeout=2000
